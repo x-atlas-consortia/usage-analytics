@@ -1,3 +1,0 @@
-# Ignore all log files generated at runtime, but keep this directory in the repo
-*
-!.gitignore

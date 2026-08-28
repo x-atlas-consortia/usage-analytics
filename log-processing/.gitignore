@@ -7,8 +7,10 @@
 # not the directory itself.
 **/exec_info/**
 !**/exec_info/.gitkeep
+!**/exec_info/README.md
 
 # All files inside any directory holding regenerable,
 # pip-installed packages but not the directory itself.
 **/reqs/**
 !**/reqs/.gitkeep
+!**/reqs/README.md
