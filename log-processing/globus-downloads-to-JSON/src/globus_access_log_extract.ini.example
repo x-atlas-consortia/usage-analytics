@@ -1,6 +1,6 @@
 [ProcessSpecificSettings]
 PROC_NAME=globus-downloads-to-JSON
-TRACKING_FILE=/hive/users/hive/scripts/PittCronJobs/analytics/log-processing/globus-downloads-to-JSON/src/globus_access_log_extract_tracking.json
+TRACKING_FILE=/hive/users/hive/scripts/PittCronJobs/analytics/usage-analytics/log-processing/globus-downloads-to-JSON/src/globus_access_log_extract_tracking.json
 LOG_FILE_NIGHTLY_DIR=/hive/hubmap/data/globus-logs
 NODE_LOG_DIR_LIST=['dtn03','dtn02','app001']
 SLACK_NOTIFICATION_CHANNEL=log-processing
