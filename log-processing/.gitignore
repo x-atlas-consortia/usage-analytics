@@ -1,0 +1,24 @@
+#########################################################
+### Entries specific to log-processing, not covered   ###
+### by the .gitignore at the root of this repository. ###
+#########################################################
+
+# All files inside any exec_info directory used for logging, but
+# not the directory itself.
+**/exec_info/**
+!**/exec_info/.gitkeep
+
+# All files inside any directory holding regenerable,
+# pip-installed packages but not the directory itself.
+**/reqs/**
+!**/reqs/.gitkeep
+reqs/**
+!reqs/.gitkeep
+
+# All files inside any exec_info/ directory anywhere under log-processing (not just
+# one directly here -- ** matches at any depth, since these currently live one level
+# deeper, under each project's own subdirectory, e.g. globus-downloads-to-JSON/exec_info/),
+# but keep the directory itself present via .gitkeep.
+**/exec_info/**
+!**/exec_info/.gitkeep
+# Same for reqs/ -- , not source to track.

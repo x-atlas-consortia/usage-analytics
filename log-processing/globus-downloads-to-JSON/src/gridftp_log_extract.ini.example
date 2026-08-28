@@ -1,0 +1,15 @@
+[ProcessSpecificSettings]
+PROC_NAME=globus-downloads-to-JSON
+TRACKING_FILE=/hive/users/hive/scripts/PittCronJobs/analytics/usage-analytics/log-processing/globus-downloads-to-JSON/src/gridftp_log_extract_tracking.json
+LOG_FILE_NIGHTLY_DIR=/hive/hubmap/data/globus-logs
+NODE_LOG_DIR_LIST=['dtn03','dtn02','app001']
+PUBLIC_DIR_PREFIX=public/
+CONSORTIUM_DIR_PREFIX=consortium/
+PROTECTED_DIR_PREFIX=protected/
+SLACK_NOTIFICATION_CHANNEL=log-processing
+SLACK_BAD_NEWS_EMOJI=:bangbang:
+SLACK_GOOD_NEWS_EMOJI=:white_check_mark:
+SLACK_NEUTRAL_INFO_EMOJI=:bell:
+SLACK_NOTIFICATIONS=ENABLED
+SLACK_USER_ID_MENTIONS_ON_ERROR={}
+SLACK_USER_ID_MENTIONS_ON_SUCCESS={}

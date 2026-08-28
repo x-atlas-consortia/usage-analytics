@@ -1,0 +1,26 @@
+[LocalServerSettings]
+TRANSFER_DETAIL_FILE=/hive/hubmap/data/public/pitt-globus-usage-reports/Globus_Usage_Transfer_Detail.csv
+NONPUBLIC_GEO_DB=/hive/users/hive/scripts/PittCronJobs/analytics/non-public_geolocation_data/IP2LOCATION-LITE-DB11.csv
+JSON_FILE_NIGHTLY_DIR=/hive/hubmap/transfer/globus_log_parsing
+# Default deploy path (GitHub checkout on vm001 hive server)
+PROJECT_HIVE_DIR=/hive/users/hive/scripts/PittCronJobs/globus_log_parsing/usage-analytics/log-processing
+# Path used to locate exec_info during local development; relative to the usage-analytics repo root.
+# N.B. Add usage-analytics/log-processing/src as a source directory in PyCharm
+#      (File > Project Structure > Sources) so sibling portfolio modules resolve correctly.
+PROJECT_DEV_DIR=log-processing
+ABS_PATH_BASE_TO_REMOVE=/hive/hubmap/data/
+
+[AWSS3ProjectSettings]
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_S3_BUCKET_NAME=logged-info-indexing
+AWS_FOLDER_DELIM=/
+AWS_ELASTICSEARCH_URL=
+AWS_REGION_NAME=us-east-1
+
+[SlackNotificationSettings]
+# Bot token from the HuBMAP Slack app (xoxb-...)
+SLACK_CHANNEL_TOKEN=
+SLACK_DEFAULT_CHANNEL=log-processing
+SLACK_SUPPORTED_CHANNELS=['log-processing']
+SLACK_MAX_MSG_LENGTH=2048

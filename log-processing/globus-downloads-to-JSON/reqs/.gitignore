@@ -1,0 +1,4 @@
+# Ignore all Python modules loaded here by pip, but keep this directory in the repo
+*
+!.gitignore
+!README.md

@@ -1,0 +1,73 @@
+# Ignore the generated BUILD file
+BUILD
+
+# Ignore configuration files which may have sensitive information
+app.cfg
+**/*.ini
+
+### Ignore Docker files that do not need to be in the repo, wherever a docker/
+### directory eventually shows up -- without **, these anchor to the .gitignore's
+### own level and miss any docker/ nested inside a future project subdirectory.
+
+# Docker copied files and directories
+**/docker/*/src
+**/docker/*/VERSION
+**/docker/*/BUILD
+
+# Ignore docker env file
+**/docker/.env
+
+### Ignore execution platform files and directories
+*.manifest
+*.DS_Store
+
+# python and python virtual environments
+**/.venv
+**/__pycache__/
+
+### Ignore execution logs and temporary directories
+
+# log files in any path
+**/*.log
+
+# Rotated log files
+**/*.log*
+
+# Project scratch directories
+tmp
+scratch
+
+### Ignore files which may be large or contain sensitive data
+
+# SQLite and DuckDB database files
+*.db*
+*.duckdb*
+
+# Generic credentials and key files common to work with
+# remote servers and service accounts
+*.pem
+*.key
+id_rsa
+id_ed25519
+.netrc
+
+#### Ignore IDE files for various platforms
+
+# PyCharm
+.idea
+
+# VS Code files
+**/.vscode/
+*.code-workspace
+
+# Eclipse project files
+.project
+.pydevproject
+
+# EMACS backup, autosave, and lock files
+*~
+\#*\#
+.\#*
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
