@@ -24,7 +24,8 @@ import stat
 import sys
 from pathlib import Path
 
-DEFAULT_DATA_ROOT = "/hive/hubmap/data/globus-logs-smoketest-july2026"
+#DEFAULT_DATA_ROOT = "/hive/hubmap/data/globus-logs-smoketest-july2026"
+DEFAULT_DATA_ROOT = "/hive/hubmap/data/globus-logs"
 DEFAULT_OUT_ROOT = "/hive/hubmap/pitt-analytics/globus-downloads-to-JSON"
 
 

@@ -14,3 +14,8 @@
 **/reqs/**
 !**/reqs/.gitkeep
 !**/reqs/README.md
+
+# Ignore the tracking files created for processing Globus
+# Grid FTP and HTTP access logs.
+globus-downloads-to-JSON/src/gridftp_log_extract_tracking.json
+globus-downloads-to-JSON/src/globus_access_log_extract_tracking.json

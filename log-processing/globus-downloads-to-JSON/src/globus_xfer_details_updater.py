@@ -138,6 +138,24 @@ STAGE1_DONE_PATTERNS = [
     ,re.compile(r'^gridftp\.log-\d{8}\.json\.DONE\.1$')
 ]
 
+# Marker filenames indicating a file went through this process (and Phase 3) at least once
+# but was left provisional: it still had a 'PENDING' record when this process last touched
+# it, meaning the usage CSV hadn't yet caught up to that record's download_date_time. Since
+# every phase runs every invocation, a file left provisional persists between runs as
+# '.LOADED.1.2.3' (it did reach Phase 3 -- geolocation doesn't depend on user-identity
+# status). The 2-level '.LOADED.1.2' form is also recognized, defensively, in case Phase 3
+# failed on this specific file on a prior run after this process succeeded. Either is
+# re-checked on every run alongside fresh STAGE1_DONE_PATTERNS matches until no 'PENDING'
+# record remains, at which point the file is renamed to '.DONE.1.2' for good (whether or not
+# any of its records ended up 'UNRESOLVED' -- that's a terminal outcome, not a retry trigger;
+# see has_pending_records).
+STAGE_LOADED_RETRY_PATTERNS = [
+    re.compile(r'^globus_access_log-\d{8}\.json\.LOADED\.1\.2$')
+    ,re.compile(r'^gridftp\.log-\d{8}\.json\.LOADED\.1\.2$')
+    ,re.compile(r'^globus_access_log-\d{8}\.json\.LOADED\.1\.2\.3$')
+    ,re.compile(r'^gridftp\.log-\d{8}\.json\.LOADED\.1\.2\.3$')
+]
+
 # The key this process uses for its own entry in each JSON object's provenance dict.
 # N.B. This is deliberately NOT PROC_NAME -- PROC_NAME is shared with the two
 #      extraction scripts to locate their output directory, and reusing it here
@@ -169,7 +187,7 @@ def verify_configuration_expectations():
                   f"'{node_json_dir_fullpath}'")
             exit_rather_than_return = True
     if exit_rather_than_return:
-        bad_news = (f":large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
+        bad_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
                     f" Halted trying to verify configuration expectations.\n"
@@ -188,10 +206,20 @@ def verify_configuration_expectations():
 #
 # Returns (globus_usage_xfer_dict, coverage_latest_utc):
 #   - globus_usage_xfer_dict: rows keyed by taskid
-#   - coverage_latest_utc: the most recent request_time found in the CSV, i.e. how far this
-#     usage report currently extends. None if no row had a parseable request_time.
+#   - coverage_latest_utc: the most recent completion_time found in the CSV, i.e. how far
+#     this usage report currently extends. None if no row had a parseable completion_time.
+# N.B. completion_time, not request_time: a transfer can have a request_time safely inside
+#      an earlier "coverage" window while still not having a CSV row at all, simply because
+#      it hasn't finished yet. Using request_time as coverage let large, long-running
+#      transfers get prematurely marked 'UNRESOLVED' (checked against the CSV, not found,
+#      coverage said it should have been findable) when they were really just still in
+#      progress -- confirmed as the root cause of the 8/31 QA investigation's two dominant
+#      UNRESOLVED task IDs. completion_time is the honest signal of "this row would exist in
+#      the CSV by now if it were ever going to, for this export."
 # N.B. Globus's usage report only covers transfers through the end of the previous month, so
 #      coverage_latest_utc lags real time -- that's expected, not a data quality problem.
+# N.B. completion_time is blank for transfers still in progress at CSV-export time -- that's
+#      normal, not a parse error, so blank values are skipped silently rather than logged.
 def load_globus_usage_xfer_from_csv():
     print(f"parsing csv from {TRANSFER_DETAIL_FILE}")
     globus_usage_xfer_dict = {}
@@ -205,41 +233,44 @@ def load_globus_usage_xfer_from_csv():
                 globus_usage_xfer_dict[row['taskid']] = row
             else:
                 logger.error(f"Missing 'taskid' to use as globus_usage_xfer_dict key in row={row}")
-            if 'request_time' in row:
+            if row.get('completion_time'):
                 try:
-                    rt_local = parse_datetime_flexible(row['request_time'])
+                    ct_local = parse_datetime_flexible(row['completion_time'])
                 except ValueError as e:
                     logger.error(f"Time conversion failure for"
-                                 f" key='request_time',"
-                                 f" value={row['request_time']},"
+                                 f" key='completion_time',"
+                                 f" value={row['completion_time']},"
                                  f" e={str(e)}")
                     continue
-                rt_local = rt_local.replace(tzinfo=tz_pgh)
-                rt_utc = rt_local.astimezone(tz_utc)
-                if coverage_latest_utc is None or rt_utc > coverage_latest_utc:
-                    coverage_latest_utc = rt_utc
+                ct_local = ct_local.replace(tzinfo=tz_pgh)
+                ct_utc = ct_local.astimezone(tz_utc)
+                if coverage_latest_utc is None or ct_utc > coverage_latest_utc:
+                    coverage_latest_utc = ct_utc
     logger.info(f"Loaded {len(globus_usage_xfer_dict)} transfer detail records from {TRANSFER_DETAIL_FILE}, keyed by taskid.")
     if coverage_latest_utc:
         logger.info(f"Usage CSV coverage extends through {coverage_latest_utc.isoformat()}.")
     else:
         logger.error(f"Unable to determine usage CSV coverage window from {TRANSFER_DETAIL_FILE}"
-                     f" (no row had a parseable request_time); every unmatched record will be"
+                     f" (no row had a parseable completion_time); every unmatched record will be"
                      f" left as 'PENDING' this run, since coverage can't be confirmed.")
     return globus_usage_xfer_dict, coverage_latest_utc
 
-# Find stage-1-complete markers under each configured node directory. A file already
-# advanced past stage 2 has a marker ending '.DONE.1.2', not '.DONE.1', so it naturally
-# stops matching here -- no separate "already done" check needed.
-def get_stage1_done_markers():
+# Find files ready for this process to work on: either freshly stage-1-complete
+# (STAGE1_DONE_PATTERNS) or previously loaded here but still waiting on the CSV to catch up
+# (STAGE_LOADED_RETRY_PATTERNS). A file already fully advanced past stage 2 has a marker
+# ending '.DONE.1.2', not '.DONE.1' or '.LOADED.1.2', so it naturally stops matching either
+# pattern set here -- no separate "already done" check needed.
+def get_processable_markers():
     global node_dir_list
 
     marker_files = []
+    all_patterns = STAGE1_DONE_PATTERNS + STAGE_LOADED_RETRY_PATTERNS
     for node_dir in node_dir_list:
         node_json_dir_fullpath = f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}{os.sep}{node_dir}"
         for f in Path(node_json_dir_fullpath).iterdir():
             if not f.is_file():
                 continue
-            if not any(pattern.fullmatch(f.name) for pattern in STAGE1_DONE_PATTERNS):
+            if not any(pattern.fullmatch(f.name) for pattern in all_patterns):
                 continue
             marker_files.append(str(f))
     return marker_files
@@ -334,18 +365,50 @@ def resolve_tbd_fields(transfer_record:dict, xfer_details_dict:dict, csv_coverag
     user_info['user_domain'] = compute_user_domain(user_info.get('user'))
     user_info['user_tld'] = compute_user_tld(user_info['user_domain'])
 
+    # Provenance is stamped unconditionally, every call, for every record this pass
+    # touches -- this timestamp reflects the last time this process actually ran and
+    # confirmed PENDING (or whatever the current value is) was still the correct
+    # value, not just the last time the value changed. That's a deliberate choice:
+    # "when did we last check this" is itself meaningful information, separate from
+    # "did the check change anything."
     if 'provenance' in transfer_record:
         transfer_record['provenance'][UPDATER_PROVENANCE_KEY] = copy.deepcopy(run_provenance)
 
     return transfer_record, resolved_any
 
-# Read the data file for one stage-1-complete marker, resolve what the transfer-details CSV
-# allows, overwrite the same data file in place, and advance the marker from '.DONE.1' to
-# '.DONE.1.2'. Returns the data file path on success, or None on failure.
+# True if any record in transfer_records still has user_info.user == 'PENDING' -- meaning
+# the usage CSV hasn't yet caught up to that record's download_date_time, so this file
+# isn't safe to call permanently settled. Once every record has moved past PENDING -- to a
+# real resolved identity, or to a settled 'UNRESOLVED' -- the file is done for good.
+# 'UNRESOLVED' is a terminal outcome here, not something this check waits on: by the time a
+# record reaches it, the CSV's own completion_time coverage has already passed its
+# download_date_time and it was checked and genuinely not found (see resolve_tbd_fields).
+def has_pending_records(transfer_records:list)->bool:
+    return any(r.get('user_info', {}).get('user') == 'PENDING' for r in transfer_records)
+
+# Read the data file for one processable marker (see get_processable_markers) -- a fresh
+# stage-1-done file, or a previously-loaded file being retried, regardless of how far it got
+# last time ('.LOADED.1.2' or '.LOADED.1.2.3' are both accepted as input; see
+# STAGE_LOADED_RETRY_PATTERNS). Resolves what the transfer-details CSV allows, overwrites the
+# same data file in place, and always writes a fresh 2-level marker: '.DONE.1.2' if no
+# 'PENDING' record remains, or '.LOADED.1.2' if at least one still does -- resetting any
+# incoming '.3' so Phase 3 re-runs on it fresh within this same invocation regardless of
+# whether this file reached Phase 3 before. Returns (data_filename, still_loaded) on
+# success, or None on failure.
 # N.B. simple/hard-coded for now, per plan -- atomic temp-file replace for the data file,
 # and the read-only permission handling, come with next week's checklist pass.
-def process_marker_file(marker_filename:str, xfer_details_dict:dict, csv_coverage_latest_utc)->str:
-    data_filename = re.sub(r'\.DONE\.1$', '', marker_filename)
+def process_marker_file(marker_filename:str, xfer_details_dict:dict, csv_coverage_latest_utc):
+    if marker_filename.endswith('.DONE.1'):
+        data_filename = re.sub(r'\.DONE\.1$', '', marker_filename)
+    elif marker_filename.endswith('.LOADED.1.2.3'):
+        data_filename = re.sub(r'\.LOADED\.1\.2\.3$', '', marker_filename)
+    elif marker_filename.endswith('.LOADED.1.2'):
+        data_filename = re.sub(r'\.LOADED\.1\.2$', '', marker_filename)
+    else:
+        logger.error(f"Marker '{marker_filename}' doesn't match any recognized stage-1-done or"
+                      f" loaded-retry pattern; skipping.")
+        return None
+
     if not os.path.isfile(data_filename):
         logger.error(f"Marker '{marker_filename}' exists but data file '{data_filename}' does not; skipping.")
         return None
@@ -356,8 +419,7 @@ def process_marker_file(marker_filename:str, xfer_details_dict:dict, csv_coverag
     run_provenance = {
         'process_script': os.path.basename(__file__)
         , 'process_utc_dt': datetime.now(tz_utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-        , 'source_log_file': data_filename
-        , 'destination_local_file': data_filename
+        , 'local_file': data_filename
     }
 
     resolved_count = 0
@@ -372,14 +434,23 @@ def process_marker_file(marker_filename:str, xfer_details_dict:dict, csv_coverag
     with open(data_filename, "w") as jf:
         jf.write(json.dumps(transfer_records))
 
-    new_marker = f"{marker_filename}.2"
-    os.rename(marker_filename, new_marker)
+    if has_pending_records(transfer_records):
+        new_marker = f"{data_filename}.LOADED.1.2"
+        still_loaded = True
+    else:
+        new_marker = f"{data_filename}.DONE.1.2"
+        still_loaded = False
+
+    if marker_filename != new_marker:
+        os.rename(marker_filename, new_marker)
+
     logger.info(f"Wrote {len(transfer_records)} records ({resolved_count} newly resolved) to"
-                f" '{data_filename}'; advanced marker to '{new_marker}'.")
-    return data_filename
+                f" '{data_filename}'; marker is now '{new_marker}'"
+                f" ({'still LOADED, will retry a future run' if still_loaded else 'advanced to DONE'}).")
+    return data_filename, still_loaded
 
 if __name__ == '__main__':
-    msg =   f":large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n" \
+    msg =   f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n" \
             f"{SLACK_NEUTRAL_INFO_EMOJI} Launched to resolve PENDING fields in" \
             f" JSON files at {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}\n" \
             f" using Globus Usage Details.\n" \
@@ -395,29 +466,34 @@ if __name__ == '__main__':
 
     xfer_details_dict, csv_coverage_latest_utc = load_globus_usage_xfer_from_csv()
 
-    marker_files = get_stage1_done_markers()
-    logger.info(f"Found {len(marker_files)} stage-1-complete files to process.")
+    marker_files = get_processable_markers()
+    logger.info(f"Found {len(marker_files)} files ready to process (stage-1-done or loaded-retry).")
 
-    processed_count = 0
+    advanced_to_done_count = 0
+    still_loaded_count = 0
     failed_count = 0
     for marker_filename in marker_files:
         try:
-            data_filename = process_marker_file(marker_filename=marker_filename
-                                                ,xfer_details_dict=xfer_details_dict
-                                                ,csv_coverage_latest_utc=csv_coverage_latest_utc)
-            if not data_filename:
+            result = process_marker_file(marker_filename=marker_filename
+                                         ,xfer_details_dict=xfer_details_dict
+                                         ,csv_coverage_latest_utc=csv_coverage_latest_utc)
+            if not result:
                 failed_count += 1
                 continue
-            processed_count += 1
+            data_filename, still_loaded = result
+            if still_loaded:
+                still_loaded_count += 1
+            else:
+                advanced_to_done_count += 1
         except Exception as e:
             logger.exception(f"Error processing '{marker_filename}'.")
             failed_count += 1
 
     if failed_count > 0:
-        bad_news = (f":large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
+        bad_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
-                    f" {failed_count} of {failed_count + processed_count} files could not be advanced to stage 2. See the logs.\n"
+                    f" {failed_count} of {failed_count + advanced_to_done_count + still_loaded_count} files could not be processed. See the logs.\n"
                     f" Process logged to {log_file_name}\n"
                     f"{':large_yellow_square::skull_and_crossbones: ' * 5}\n"
                     f":large_yellow_circle:")
@@ -427,11 +503,12 @@ if __name__ == '__main__':
                                            , mentions_dict=slack_user_id_mentions_on_error_dict)
 
     process_utc_finish = datetime.now(tz_utc)
-    good_news = (f":large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
+    good_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
                  f"{SLACK_GOOD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                  f" finished at {process_utc_finish.strftime('%Y-%m-%d %H:%M:%S %Z')} after"
                  f" {int((process_utc_finish - process_utc_start).total_seconds() // 60)} minutes.\n"
-                 f" Advanced {processed_count} files to stage 2, {failed_count} failed.\n"
+                 f" {advanced_to_done_count} files advanced to DONE, {still_loaded_count} still LOADED"
+                 f" (will retry a future run), {failed_count} failed.\n"
                  f" Process logged to {log_file_name}\n"
                  f"{':yellow_heart: ' * 5}\n"
                  f":large_yellow_circle:")

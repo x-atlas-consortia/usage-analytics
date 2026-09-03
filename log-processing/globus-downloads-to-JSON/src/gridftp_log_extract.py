@@ -270,7 +270,7 @@ def verify_configuration_expectations():
               f"'{TRACKING_FILE}' relative to '{os.getcwd()}'.")
         exit_rather_than_return = True
     if exit_rather_than_return:
-        bad_news = (f":large_purple_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_purple_circle:\n"
+        bad_news = (f":large_purple_circle: {portfolio_utils.get_slack_host_context()} :large_purple_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_purple_circle:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
                     f" Halted trying to verify configuration expectations.\n"
@@ -620,7 +620,7 @@ def get_unparsed_log_dict():
     return parsing_src_dest_dict
 
 if __name__ == '__main__':
-    msg =   f":large_purple_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_purple_circle:\n" \
+    msg =   f":large_purple_circle: {portfolio_utils.get_slack_host_context()} :large_purple_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_purple_circle:\n" \
             f"{SLACK_NEUTRAL_INFO_EMOJI} Launched to process Grid FTP logs\n" \
             f" to create JSON files at {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}.\n" \
             f" Process logging to {log_file_name}\n" \
@@ -750,7 +750,7 @@ if __name__ == '__main__':
                                                , pydict=tracking_dict)
 
     process_utc_finish = datetime.now(tz_utc)
-    good_news = (f":large_purple_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_purple_circle:\n"
+    good_news = (f":large_purple_circle: {portfolio_utils.get_slack_host_context()} :large_purple_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_purple_circle:\n"
                  f"{SLACK_GOOD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                  f" finished at {process_utc_finish.strftime('%Y-%m-%d %H:%M:%S %Z')} after"
                  f" {int((process_utc_finish - process_utc_start).total_seconds() // 60)} minutes.\n"

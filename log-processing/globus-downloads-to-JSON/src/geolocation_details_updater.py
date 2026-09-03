@@ -140,6 +140,16 @@ STAGE2_DONE_PATTERNS = [
     ,re.compile(r'^gridftp\.log-\d{8}\.json\.DONE\.1\.2$')
 ]
 
+# Stage 2 also hands off files it left provisional -- at least one 'PENDING' record, still
+# waiting on the usage CSV to catch up -- rather than settled. Geolocation doesn't depend on
+# user-identity resolution at all, so these are processed exactly like STAGE2_DONE_PATTERNS
+# matches; this process just carries the LOADED word forward onto its own output marker
+# rather than ever flipping it to DONE itself. See process_marker_file below.
+STAGE2_LOADED_PATTERNS = [
+    re.compile(r'^globus_access_log-\d{8}\.json\.LOADED\.1\.2$')
+    ,re.compile(r'^gridftp\.log-\d{8}\.json\.LOADED\.1\.2$')
+]
+
 # The key this process uses for its own entry in each JSON object's provenance dict.
 # N.B. This is deliberately NOT PROC_NAME -- PROC_NAME is shared with the earlier
 #      stages to locate their output directory, and reusing it here would silently
@@ -171,7 +181,7 @@ def verify_configuration_expectations():
                   f"'{node_json_dir_fullpath}'")
             exit_rather_than_return = True
     if exit_rather_than_return:
-        bad_news = (f":large_blue_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_blue_circle:\n"
+        bad_news = (f":large_blue_circle: {portfolio_utils.get_slack_host_context()} :large_blue_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_blue_circle:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
                     f" Halted trying to verify configuration expectations.\n"
@@ -185,19 +195,22 @@ def verify_configuration_expectations():
                                            , mentions_dict=slack_user_id_mentions_on_error_dict)
         sys.exit(2)
 
-# Find stage-2-complete markers under each configured node directory. A file already
-# advanced past stage 3 has a marker ending '.DONE.1.2.3', not '.DONE.1.2', so it
-# naturally stops matching here -- no separate "already done" check needed.
+# Find files ready for this process: either freshly stage-2-complete (STAGE2_DONE_PATTERNS)
+# or stage-2-complete-but-left-provisional (STAGE2_LOADED_PATTERNS) -- both are equally ready
+# for geolocation, since that doesn't depend on user-identity resolution. A file already
+# advanced past stage 3 has a marker ending '.DONE.1.2.3' or '.LOADED.1.2.3', not '.DONE.1.2'
+# or '.LOADED.1.2', so it naturally stops matching either pattern set here.
 def get_stage2_done_markers():
     global node_dir_list
 
     marker_files = []
+    all_patterns = STAGE2_DONE_PATTERNS + STAGE2_LOADED_PATTERNS
     for node_dir in node_dir_list:
         node_json_dir_fullpath = f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}{os.sep}{node_dir}"
         for f in Path(node_json_dir_fullpath).iterdir():
             if not f.is_file():
                 continue
-            if not any(pattern.fullmatch(f.name) for pattern in STAGE2_DONE_PATTERNS):
+            if not any(pattern.fullmatch(f.name) for pattern in all_patterns):
                 continue
             marker_files.append(str(f))
     return marker_files
@@ -243,14 +256,24 @@ def add_geolocation_info(transfer_record: dict, ip2geo: IP2Geo, run_provenance: 
 
     return transfer_record
 
-# Read the data file for one stage-2-complete marker, add geolocation_info to every
-# record using the shared IP2Geo instance, overwrite the same data file in place, and
-# advance the marker from '.DONE.1.2' to '.DONE.1.2.3'. Returns the data file path on
-# success, or None on failure.
+# Read the data file for one stage-2-complete marker (DONE or LOADED -- see
+# get_stage2_done_markers), add geolocation_info to every record using the shared IP2Geo
+# instance, overwrite the same data file in place, and append '.3' to the marker -- carrying
+# forward whichever word (DONE or LOADED) it arrived with. This process never decides
+# DONE vs LOADED itself; that's entirely Phase 2's call, already made before this file
+# reached here. Returns the data file path on success, or None on failure.
 # N.B. simple/hard-coded for now, per plan -- atomic temp-file replace for the data
 # file, and read-only permission handling, come with the deferred hardening pass.
 def process_marker_file(marker_filename: str, ip2geo: IP2Geo) -> str:
-    data_filename = re.sub(r'\.DONE\.1\.2$', '', marker_filename)
+    if marker_filename.endswith('.DONE.1.2'):
+        data_filename = re.sub(r'\.DONE\.1\.2$', '', marker_filename)
+    elif marker_filename.endswith('.LOADED.1.2'):
+        data_filename = re.sub(r'\.LOADED\.1\.2$', '', marker_filename)
+    else:
+        logger.error(f"Marker '{marker_filename}' doesn't match either a stage-2-done or a"
+                      f" stage-2-loaded pattern; skipping.")
+        return None
+
     if not os.path.isfile(data_filename):
         logger.error(f"Marker '{marker_filename}' exists but data file '{data_filename}' does not; skipping.")
         return None
@@ -261,8 +284,7 @@ def process_marker_file(marker_filename: str, ip2geo: IP2Geo) -> str:
     run_provenance = {
         'process_script': os.path.basename(__file__)
         , 'process_utc_dt': datetime.now(tz_utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-        , 'source_log_file': data_filename
-        , 'destination_local_file': data_filename
+        , 'local_file': data_filename
     }
 
     for idx, transfer_record in enumerate(transfer_records):
@@ -280,7 +302,7 @@ def process_marker_file(marker_filename: str, ip2geo: IP2Geo) -> str:
     return data_filename
 
 if __name__ == '__main__':
-    msg =   f":large_blue_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_blue_circle:\n" \
+    msg =   f":large_blue_circle: {portfolio_utils.get_slack_host_context()} :large_blue_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_blue_circle:\n" \
             f"{SLACK_NEUTRAL_INFO_EMOJI} Launched to add geolocation fields to" \
             f" JSON files at {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}\n" \
             f" using the ipaddress module and data.\n" \
@@ -318,7 +340,7 @@ if __name__ == '__main__':
             failed_count += 1
 
     if failed_count > 0:
-        bad_news = (f":large_blue_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_blue_circle:\n"
+        bad_news = (f":large_blue_circle: {portfolio_utils.get_slack_host_context()} :large_blue_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_blue_circle:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
                     f" {failed_count} of {failed_count + processed_count} files could not be advanced to stage 3. See the logs.\n"
@@ -331,7 +353,7 @@ if __name__ == '__main__':
                                            , mentions_dict=slack_user_id_mentions_on_error_dict)
 
     process_utc_finish = datetime.now(tz_utc)
-    good_news = (f":large_blue_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_blue_circle:\n"
+    good_news = (f":large_blue_circle: {portfolio_utils.get_slack_host_context()} :large_blue_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_blue_circle:\n"
                  f"{SLACK_GOOD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                  f" finished at {process_utc_finish.strftime('%Y-%m-%d %H:%M:%S %Z')} after"
                  f" {int((process_utc_finish - process_utc_start).total_seconds() // 60)} minutes.\n"

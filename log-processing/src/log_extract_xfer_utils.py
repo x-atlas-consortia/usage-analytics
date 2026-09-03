@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import configparser
+import socket
 import requests
 # Don't confuse urllib (Python native library) with urllib3 (3rd-party library, requests also uses urllib3)
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -157,6 +158,66 @@ class LogExtractXferUtils:
         except Exception as e:
             logger.error(f"Could not check gzip magic number: {e}")
             return False
+
+    ####################################################################################################
+    ## Host / Container Context (for Slack messages)
+    ####################################################################################################
+
+    def get_short_hostname(self) -> str:
+        """
+        Return the short hostname (no domain suffix), e.g. "dtn03".
+
+        On bare metal, this is equivalent to `hostname -s` / the
+        `cat /etc/hostname | sed 's/\\..*//'` pipeline: socket.gethostname()
+        reads the same kernel-level hostname, and .split(".")[0] strips any
+        domain suffix the same way the sed does.
+
+        Inside a container, though, the kernel-level hostname is normally the
+        container's own hostname (often a random ID Docker assigns), NOT the
+        name of the physical or VM host it's running on. To keep host identity
+        meaningful after a move to Docker, a container launcher should export
+        HOST_HOSTNAME (e.g. `-e HOST_HOSTNAME=$(hostname -s)` on `docker run`,
+        or the equivalent in a compose file or wrapper script). When present,
+        that value takes priority over the kernel hostname.
+        """
+        override = os.environ.get('HOST_HOSTNAME')
+        if override:
+            return override.split('.')[0]
+        return socket.gethostname().split('.')[0]
+
+    def is_running_in_container(self) -> bool:
+        """
+        Best-effort detection of whether this process is running inside a
+        Docker (or Docker-like) container.
+
+        Checks, in order:
+          1. /.dockerenv -- present in essentially all Docker containers.
+          2. /proc/1/cgroup -- looks for docker/containerd/kubepods markers,
+             as a fallback for setups where /.dockerenv isn't present
+             (e.g. some Kubernetes runtimes).
+        """
+        if os.path.exists('/.dockerenv'):
+            return True
+
+        try:
+            with open('/proc/1/cgroup', 'rt') as f:
+                content = f.read()
+            if any(marker in content for marker in ('docker', 'containerd', 'kubepods')):
+                return True
+        except (FileNotFoundError, PermissionError):
+            pass
+
+        return False
+
+    def get_slack_host_context(self) -> str:
+        """
+        A single string to drop into Slack messages, e.g.:
+            "dtn03 (bare metal)"
+            "dtn03 (container)"
+        """
+        host = self.get_short_hostname()
+        location = 'container' if self.is_running_in_container() else 'bare metal'
+        return f"{host} ({location})"
 
     ####################################################################################################
     ## Slack Notification

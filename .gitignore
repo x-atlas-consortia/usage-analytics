@@ -22,6 +22,7 @@ app.cfg
 *.DS_Store
 
 # python and python virtual environments
+**/venv
 **/.venv
 **/__pycache__/
 

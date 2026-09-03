@@ -1,7 +1,7 @@
 [LocalServerSettings]
 TRANSFER_DETAIL_FILE=/hive/hubmap/data/public/pitt-globus-usage-reports/Globus_Usage_Transfer_Detail.csv
 NONPUBLIC_GEO_DB=/hive/users/hive/scripts/PittCronJobs/analytics/non-public_geolocation_data/IP2LOCATION-LITE-DB11.csv
-JSON_FILE_NIGHTLY_DIR=/hive/hubmap/transfer/globus_log_parsing
+JSON_FILE_NIGHTLY_DIR=/hive/hubmap/pitt-analytics
 # Default deploy path (GitHub checkout on vm001 hive server)
 PROJECT_HIVE_DIR=/hive/users/hive/scripts/PittCronJobs/globus_log_parsing/usage-analytics/log-processing
 # Path used to locate exec_info during local development; relative to the usage-analytics repo root.
