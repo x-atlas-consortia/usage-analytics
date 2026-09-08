@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from dotenv import load_dotenv
 import glob
 import gzip
@@ -6,19 +6,15 @@ import json
 import os
 import re
 load_dotenv()
-LOG_DIR = os.getenv("GATEWAY_LOG_DIR", "/hive/hubmap/data/gateway-logs")
+LOG_DIR = os.getenv("GATEWAY_LOG_DIR", "/hive/hubmap/data/gateway-logs/vm001-dev")
 LOG_FILENAME_PATTERN = os.getenv("GATEWAY_LOG_PATTERN", r"uwsgi-hubmap-auth\.log-(\d{8})\.gz")
 OUTPUT_DIR = os.getenv("USAGE_OUTPUT_DIR", "./output")
-LAST_MTIME_PATH = os.getenv("USAGE_LAST_MTIME_PATH", "./last_processed_mtime.json")
-
+LAST_DATE_PATH = os.getenv("USAGE_LAST_DATE_PATH", "./last_processed_date.json")
 AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME")
 AWS_S3_FOLDER_NAME = os.getenv("AWS_S3_FOLDER_NAME", "")
 AWS_S3_DELIM = os.getenv("AWS_S3_DELIM", "/")
-
 CLF_TIME_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
-
 filename_pattern = re.compile(LOG_FILENAME_PATTERN)
-
 usage_line_pattern = re.compile(
     r'(?P<client_ip>\S+) '
     r'(?P<caller>\S+) '
@@ -30,26 +26,21 @@ usage_line_pattern = re.compile(
     r'pattern=(?P<pattern>\S+) '
     r'authority=(?P<authority>\S+)'
 )
-
-
-def load_last_mtime():
+def load_last_date():
     try:
-        with open(LAST_MTIME_PATH) as f:
-            return float(json.load(f)["last_processed_mtime"])
+        with open(LAST_DATE_PATH) as f:
+            return int(json.load(f)["last_processed_date"])
     except (FileNotFoundError, KeyError, ValueError):
-        return 0.0
-
-
-def save_last_mtime(mtime):
-    with open(LAST_MTIME_PATH, "w") as f:
-        json.dump({"last_processed_mtime": mtime}, f)
-
-
+        return 0
+def save_last_date(date_int):
+    with open(LAST_DATE_PATH, "w") as f:
+        json.dump({"last_processed_date": date_int}, f)
 def discover_rotated_logs():
     found = []
     for path in glob.glob(os.path.join(LOG_DIR, "*")):
-        if filename_pattern.search(os.path.basename(path)):
-            found.append((os.path.getmtime(path), path))
+        match = filename_pattern.search(os.path.basename(path))
+        if match:
+            found.append((int(match.group(1)), path))
     found.sort(key=lambda pair: pair[0])
     return found
 
@@ -92,13 +83,8 @@ def process_file(path):
             if record is not None:
                 records.append(record)
     return records
-
-
-def output_name(mtime):
-    stamp = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
-    return f"api_usage-{stamp}.json"
-
-
+def output_name(date_int):
+    return f"api_usage-{date_int}.json"
 def write_output(name, records):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, name)
@@ -115,9 +101,9 @@ def upload_to_s3(s3_client, local_path, name):
 
 
 def main():
-    last_mtime = load_last_mtime()
+    last_date = load_last_date()
     rotated_logs = discover_rotated_logs()
- 
+
     s3_client = None
     if AWS_S3_BUCKET_NAME:
         import boto3
@@ -127,31 +113,28 @@ def main():
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
             region_name=os.getenv("AWS_REGION_NAME"),
         )
- 
+
     newly_processed = 0
-    highest_mtime = last_mtime
-    for mtime, path in rotated_logs:
-        if mtime <= last_mtime:
+    highest_date = last_date
+    for date_int, path in rotated_logs:
+        if date_int <= last_date:
             continue
         records = process_file(path)
-        name = output_name(mtime)
+        name = output_name(date_int)
         local_path = write_output(name, records)
         if s3_client is not None:
             object_name = upload_to_s3(s3_client, local_path, name)
             print(f"Uploaded {len(records)} records from {os.path.basename(path)} to s3://{AWS_S3_BUCKET_NAME}/{object_name}")
         else:
             print(f"Wrote {len(records)} records from {os.path.basename(path)} to {local_path} (S3 upload skipped: no bucket configured)")
-        if mtime > highest_mtime:
-            highest_mtime = mtime
+        if date_int > highest_date:
+            highest_date = date_int
         newly_processed += 1
-
-    if highest_mtime > last_mtime:
-        save_last_mtime(highest_mtime)
-
+    if highest_date > last_date:
+        save_last_date(highest_date)
     if newly_processed == 0:
         print("No new rotated log files to process.")
 
 
 if __name__ == "__main__":
     main()
- 
