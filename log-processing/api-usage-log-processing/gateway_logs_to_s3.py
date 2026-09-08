@@ -1,7 +1,10 @@
 from datetime import datetime
 from dotenv import load_dotenv
+import configparser
+import csv
 import glob
 import gzip
+import ipaddress
 import json
 import os
 import re
@@ -10,10 +13,13 @@ LOG_DIR = os.getenv("GATEWAY_LOG_DIR", "/hive/hubmap/data/gateway-logs/vm001-dev
 LOG_FILENAME_PATTERN = os.getenv("GATEWAY_LOG_PATTERN", r"uwsgi-hubmap-auth\.log-(\d{8})\.gz")
 OUTPUT_DIR = os.getenv("USAGE_OUTPUT_DIR", "./output")
 LAST_DATE_PATH = os.getenv("USAGE_LAST_DATE_PATH", "./last_processed_date.json")
+PORTFOLIO_INI_PATH = os.getenv("PORTFOLIO_INI_PATH", "../../src/logProcessingProject.ini")
 AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME")
 AWS_S3_FOLDER_NAME = os.getenv("AWS_S3_FOLDER_NAME", "")
 AWS_S3_DELIM = os.getenv("AWS_S3_DELIM", "/")
 CLF_TIME_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
+GEO_FIELDS = ("country_code", "country_name", "region_name", "city_name", "zip_code")
+UNKNOWN_GEO = {field: "UNKNOWN" for field in GEO_FIELDS}
 filename_pattern = re.compile(LOG_FILENAME_PATTERN)
 usage_line_pattern = re.compile(
     r'(?P<client_ip>\S+) '
@@ -26,6 +32,27 @@ usage_line_pattern = re.compile(
     r'pattern=(?P<pattern>\S+) '
     r'authority=(?P<authority>\S+)'
 )
+def load_geo_db_path():
+    config = configparser.ConfigParser()
+    config.read(PORTFOLIO_INI_PATH)
+    return config.get("LocalServerSettings", "NONPUBLIC_GEO_DB")
+def load_geo_ranges(geo_db_path):
+    ranges = []
+    with open(geo_db_path, newline='') as f:
+        for row in csv.DictReader(f, delimiter='\t'):
+            if "ip_from" not in row or "ip_to" not in row:
+                continue
+            ranges.append((int(row["ip_from"]), int(row["ip_to"]), {field: row.get(field) for field in GEO_FIELDS}))
+    return ranges
+def geolocate(client_ip, geo_ranges):
+    try:
+        ip_int = int(ipaddress.ip_address(client_ip.strip()))
+    except (ValueError, AttributeError):
+        return dict(UNKNOWN_GEO)
+    for ip_from, ip_to, geo in geo_ranges:
+        if ip_from <= ip_int <= ip_to:
+            return dict(geo)
+    return dict(UNKNOWN_GEO)
 def load_last_date():
     try:
         with open(LAST_DATE_PATH) as f:
@@ -49,9 +76,22 @@ def open_log_file(path):
     if path.endswith(".gz"):
         return gzip.open(path, "rt", errors="replace")
     return open(path, "rt", errors="replace")
-
-
-def parse_line(line):
+def build_user_info(user, client_ip):
+    if user and user != "-":
+        username = user
+        if "@" in username:
+            user_domain = username.split("@")[1]
+            labels = user_domain.split(".")
+            user_tld = ".".join(labels[-2:]) if len(labels) >= 2 else user_domain
+        else:
+            user_domain = None
+            user_tld = None
+    else:
+        username = f"UNKNOWN@{client_ip}"
+        user_domain = None
+        user_tld = None
+    return {"user": username, "user_domain": user_domain, "user_tld": user_tld}
+def parse_line(line, geo_ranges):
     match = usage_line_pattern.search(line)
     if match is None:
         return None
@@ -72,14 +112,14 @@ def parse_line(line):
         "http_method": method,
         "client_ip": fields["client_ip"],
         "host": fields["authority"],
+        "user_info": build_user_info(fields["user"], fields["client_ip"]),
+        "geolocation_info": geolocate(fields["client_ip"], geo_ranges),
     }
-
-
-def process_file(path):
+def process_file(path, geo_ranges):
     records = []
     with open_log_file(path) as f:
         for line in f:
-            record = parse_line(line)
+            record = parse_line(line, geo_ranges)
             if record is not None:
                 records.append(record)
     return records
@@ -103,7 +143,7 @@ def upload_to_s3(s3_client, local_path, name):
 def main():
     last_date = load_last_date()
     rotated_logs = discover_rotated_logs()
-
+    geo_ranges = load_geo_ranges(load_geo_db_path())
     s3_client = None
     if AWS_S3_BUCKET_NAME:
         import boto3
@@ -119,7 +159,7 @@ def main():
     for date_int, path in rotated_logs:
         if date_int <= last_date:
             continue
-        records = process_file(path)
+        records = process_file(path, geo_ranges)
         name = output_name(date_int)
         local_path = write_output(name, records)
         if s3_client is not None:
