@@ -1,0 +1,44 @@
+[ProcessSpecificSettings]
+PROC_NAME=portfolio-monitoring
+SLACK_NOTIFICATION_CHANNEL=log-processing
+SLACK_BAD_NEWS_EMOJI=:bangbang:
+SLACK_NEUTRAL_NEWS_EMOJI=:neutral_face:
+SLACK_GOOD_NEWS_EMOJI=:white_check_mark:
+SLACK_START_INFO_EMOJI=:bell:
+SLACK_BAD_ITEM_EMOJI=:heavy_minus_sign:
+SLACK_NEUTRAL_ITEM_EMOJI=:heavy_equals_sign:
+SLACK_GOOD_ITEM_EMOJI=:heavy_plus_sign:
+SLACK_NOTIFICATIONS=ENABLED
+SLACK_USER_ID_MENTIONS_ON_ERROR={'Karl Burke': 'U03ADFJB7DF'}
+SLACK_USER_ID_MENTIONS_ON_SUCCESS={'Karl Burke': 'U03ADFJB7DF'}
+
+# Comma-separated list of keys to monitor. Each key must already be exposed by
+# LogExtractXferUtils.get_config() -- i.e. declared in the shared logProcessingProject.ini's
+# [LocalServerSettings] section. This monitor resolves each key's *path* from there at startup;
+# it never keeps its own copy of a path, so there's nothing here that can drift out of sync
+# with the actual source of truth. Each key listed here must also have its own [KEY_NAME]
+# section below, declaring FILE_SIZE_CHARACTERISTIC and STALE_THRESHOLD_HOURS.
+[MonitoredFiles]
+FILE_KEYS=TRANSFER_DETAIL_FILE,NONPUBLIC_GEO_DB
+
+# See 
+# FILE_SIZE_CHARACTERISTIC=APPEND_ONLY -- this file should only ever grow between deliveries. Shrinking is
+#   always treated as bad news (an alert, same severity as staleness). Growing is good news,
+#   reported with a line-count delta.
+# FILE_SIZE_CHARACTERISTIC=VARIABLE -- this file is periodically replaced wholesale (e.g. a downloaded
+#   reference database). Growing or shrinking is normal and reported as neutral info only,
+#   never an alert. Staleness is still always an alert, regardless of FILE_SIZE_CHARACTERISTIC.
+[TRANSFER_DETAIL_FILE]
+FILE_SIZE_CHARACTERISTIC=APPEND_ONLY
+# Deliveries land roughly once a day, so this defaults to a day plus a one-hour grace window.
+STALE_THRESHOLD_HOURS=25
+
+[NONPUBLIC_GEO_DB]
+FILE_SIZE_CHARACTERISTIC=VARIABLE
+# IP2Location publishes a new LITE release on the first day of each calendar month.
+# Currently, this is manually refreshed.  Maybe a future job will automatically pull that
+# release onto this server.  In the meantime, let's go ahead with a "bad news" message
+# when it is stale, just to verify it works.
+# Placeholder below is "a month plus a week of grace"
+# (31 + 7 = 38 days = 912 hours).
+STALE_THRESHOLD_HOURS=912

@@ -1,0 +1,14 @@
+{
+  "TRANSFER_DETAIL_FILE": {
+    "last_check_utc": "2026-09-09T12:25:02.673270Z",
+    "size": 798043775,
+    "mtime_utc": "2026-09-08T17:29:37.000000Z",
+    "line_count": 819706
+  },
+  "NONPUBLIC_GEO_DB": {
+    "last_check_utc": "2026-09-09T12:25:02.673270Z",
+    "size": 286974100,
+    "mtime_utc": "2026-08-28T20:25:45.000000Z",
+    "line_count": 2984120
+  }
+}

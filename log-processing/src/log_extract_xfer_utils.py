@@ -86,7 +86,10 @@ class LogExtractXferUtils:
         
         self.portfolio_config_dict['TRANSFER_DETAIL_FILE'] = config.get('LocalServerSettings', 'TRANSFER_DETAIL_FILE')
         self.portfolio_config_dict['NONPUBLIC_GEO_DB'] = config.get('LocalServerSettings', 'NONPUBLIC_GEO_DB')
+        self.portfolio_config_dict['DUCKDB_PATH'] = config.get('LocalServerSettings', 'DUCKDB_PATH')
         self.portfolio_config_dict['JSON_FILE_NIGHTLY_DIR'] = config.get('LocalServerSettings', 'JSON_FILE_NIGHTLY_DIR')
+        self.portfolio_config_dict['PIPELINE_OUTPUT_DIR'] = config.get('LocalServerSettings', 'PIPELINE_OUTPUT_DIR')
+        self.portfolio_config_dict['NODE_LOG_DIR_LIST'] = config.get('LocalServerSettings', 'NODE_LOG_DIR_LIST')
         self.portfolio_config_dict['PROJECT_HIVE_DIR'] = config.get('LocalServerSettings', 'PROJECT_HIVE_DIR')
         self.portfolio_config_dict['PROJECT_DEV_DIR'] = config.get('LocalServerSettings', 'PROJECT_DEV_DIR')
         self.portfolio_config_dict['ABS_PATH_BASE_TO_REMOVE'] = config.get('LocalServerSettings', 'ABS_PATH_BASE_TO_REMOVE')
