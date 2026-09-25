@@ -3,68 +3,66 @@
 DuckDB loader for the globus-downloads-to-JSON pipeline's File Downloads
 output (GridFTP + HTTP transfer logs on dtn03 / dtn02 / app001).
 
-Per run:
-  1. Duplicate-match validation, FIRST, across all node directories. If any
-     (node, prefix, date, state) matches more than one sentinel file, log
-     every offending case and exit before touching DuckDB at all.
-  2. Hot tail: wiped completely, then rebuilt from scratch from whatever
-     currently matches the LOADED sentinel pattern. No diffing, no history.
-  3. Frozen zone: append-only, driven by a DuckDB-internal ledger table
-     keyed by (node, prefix, date) -> sentinel filename loaded. A DONE
-     sentinel whose name is unchanged from the ledger is a no-op; one
-     extended by an unbroken run of the next sequential phase number(s)
-     triggers a reload (log.info); anything else -- missing, shorter, or
-     a non-sequential change -- triggers a log.error and is left alone.
+N.B. The ETL of File Downloads logged file transfers to DuckDB is assumed
+     to be a nightly process, even if delivery of data means there are
+     many nights with little or no change (e.g. waiting for a new
+     "usage details" spreadsheet from Globus most of the month.)
 
-Sentinel content is otherwise treated as opaque: this loader does not know
-or care what "LOADED" or "DONE" mean beyond the two regex states above, so
-renaming/restructuring the rest of the sentinel vocabulary upstream should
-not require changes here.
+N.B. The File Downloads data is split into two tables, which can be
+     characterized as partial/complete, volatile/settled, hot/frozen, etc.
+     The tables are hot_file_download and file_download, each with the
+     same structure.  There is no data movement within DuckDB. All data is
+     managed by this "load" step of the ETL pipeline.
 
-NOTE ON STORAGE (v1 simplification, flagged for discussion): "hot tail" and
-"frozen zone" are the concepts (recent + volatile vs. settled + append-only);
-the actual tables are hot_file_download (LOADED-backed) and file_download
-(DONE-backed), both plain DuckDB tables inside one .duckdb file, loaded
-directly via read_json_auto -- not the monthly-consolidated Parquet layout
-discussed earlier. Whether Parquet export happens at all is now an open
-question rather than a settled follow-on step: the whole hybrid design may
-simplify to DuckDB-only once evaluated and reviewed. Exporting a table to
-partitioned Parquet later, if it does happen, is a cheap columnar copy of
-already-typed data (not a re-parse of the source JSON), so it doesn't cost
-much either way.
+N.B. The tables within DuckDB are performing adequately after the initial
+     build with 72M rows, so use of Parquet is not currently implemented.
 
-NOTE ON CONFIG: this loader lives in analytics-platform-loading, a sibling
-project to log-processing/src (where the shared logProcessingProject.ini
-and log_extract_xfer_utils.py live). Per Karl's call, there is no
---process-dir argument -- config discovery relies on a consistent cwd
-convention, and PIPELINE_OUTPUT_DIR / NODE_LOG_DIR_LIST / DUCKDB_PATH now
-live in the SHARED ini rather than this project's own. This project's own
-duckdb_loader.ini is now shaped exactly like every other process's own ini
-([ProcessSpecificSettings]: PROC_NAME + Slack settings), per Karl's call to
-align conventions. See loader_config.py for the actual discovery logic and
-the two things flagged there rather than assumed (JSON_FILE_NIGHTLY_DIR's
-removal from the shared ini, and whether LogExtractXferUtils.get_config()
-already exposes the three new shared keys).
+Sentinel files should exist along with each JSON file with file transfer
+content.  Comments in the globus-downloads-to-JSON pipeline should
+describe the various stats of sentinel files.  This loader's interpretation
+of sentinal files is as follows.
 
-NOTE ON PROVENANCE: the `provenance` field from the source JSON is not
-currently loaded into either table -- none of the sponsor's initial query
-batch needs it, and Phase 2/3 re-stamp their `process_utc_dt` on every run
-regardless of whether the record changed, so it wouldn't be reliable for
-freshness logic anyway. Add it later if a query needs it.
+1. On each run, if there are any duplicate sentinel files, log each one
+   and exit.
+2. The content associated with LOADED sentinel files is used to create
+   the hot_file_download table.  This should reflect logged file transfers
+   for which more information may eventually be received.  The table is
+   simply dropped and created from LOADED-associated content each time.
+   This is a quick operation because only the current and maybe previous
+   month have partial information.  All other file transfers have as much
+   information as they will ever have.
+3. The content associated with DONE sentinel files is used to create
+   the file_download table. A ledger kept in file_download_ledger tracking
+   the sentinel files seen during previous loads.
+   3.1 If the current sentinel file matches the sentinel file of the last
+       load, the content is skipped.
+   3.2 If the sentinel file suffix reflects a well-formed pattern indicating
+       additional globus-downloads-to-JSON pipeline "phases" have been run
+       on the content, the content is reloaded.
+   3.3 Other changes to the sentinel file log an error, and the content is
+       skipped.
+
+The content JSON files may contain information not loaded into the DuckDB
+tables, notably the `provenance` field.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import configparser
 import logging
+import os
+import re
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 
-from loader_config import find_exec_info_dir, load_own_config, load_shared_config
+from log_extract_xfer_utils import LogExtractXferUtils
 from sentinel_logic import (
     SentinelMatch,
     is_sequential_extension,
@@ -72,26 +70,132 @@ from sentinel_logic import (
     validate_no_duplicates,
 )
 
-LOGGER = logging.getLogger("globus_downloads_loader")
+tz_utc = ZoneInfo("UTC")
+process_utc_start = datetime.now(tz_utc)
 
-# How often (in files processed) to log a progress line during the
-# potentially long frozen-zone / hot-tail loops -- so a run has a visible
-# timing trail in the exec_info log even if nobody is watching the console.
+print('Loading globus-downloads-to-JSON output into DuckDB')
+
+# There is no phases to this load process, unlike the extract and transform process, so
+# just use the default emoji without trying to figure out a phase.
+SLACK_PHASE_EMOJI = ':diamonds:'
+
+arg_parser = argparse.ArgumentParser(
+    description='Load globus-downloads-to-JSON output into DuckDB.'
+)
+arg_parser.add_argument('--project-dir', required=True, dest='project_dir',
+                         help="This project's own directory (one level above src/), e.g."
+                              " .../log-processing/analytics-platform-loading. Normally supplied"
+                              " by the .sh wrapper's own PROJECT_DIR.")
+arg_parser.add_argument(
+    '--source-root', type=Path, default=None,
+    help="Override PIPELINE_OUTPUT_DIR. Mainly for pointing at synthetic "
+         "fixtures during testing.",
+)
+arg_parser.add_argument(
+    '--duckdb-path', type=Path, default=None,
+    help="Override DUCKDB_PATH from the shared config.",
+)
+arg_parser.add_argument(
+    '--max-rows-per-file', type=int, default=None,
+    help="TESTING ONLY: load at most this many records from each source "
+         "JSON file, silently dropping the rest. Defaults to unlimited. "
+         "Never pass this for a real production run.",
+)
+args = arg_parser.parse_args()
+arg_project_dir = args.project_dir
+arg_portfolio_dir = os.path.dirname(arg_project_dir)
+
+Config = configparser.ConfigParser()
+
+process_ini_candidates = [
+    Path('duckdb_loader.ini'),
+    Path(f'{arg_project_dir}/src/duckdb_loader.ini'),
+    Path('../../analytics-platform-loading/src/duckdb_loader.ini'),
+]
+config_file_name = None
+for candidate in process_ini_candidates:
+    if candidate.is_file():
+        config_file_name = str(candidate.resolve())
+        break
+if not config_file_name:
+    print(f"\a\nUnable to find duckdb_loader.ini in any expected location.\n")
+    sys.exit(3)
+Config.read(config_file_name)
+try:
+    PROJECT_NAME = Config.get('ProcessSpecificSettings', 'PROJECT_NAME')
+    SLACK_NOTIFICATION_CHANNEL = Config.get('ProcessSpecificSettings', 'SLACK_NOTIFICATION_CHANNEL')
+    SLACK_BAD_NEWS_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_BAD_NEWS_EMOJI')
+    SLACK_GOOD_NEWS_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_GOOD_NEWS_EMOJI')
+    SLACK_NEUTRAL_INFO_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_NEUTRAL_INFO_EMOJI')
+    SLACK_NOTIFICATIONS = Config.get('ProcessSpecificSettings', 'SLACK_NOTIFICATIONS')
+    slack_user_id_mentions_on_error_dict = ast.literal_eval(Config.get('ProcessSpecificSettings', 'SLACK_USER_ID_MENTIONS_ON_ERROR'))
+    slack_user_id_mentions_on_success_dict = ast.literal_eval(Config.get('ProcessSpecificSettings', 'SLACK_USER_ID_MENTIONS_ON_SUCCESS'))
+except Exception as e:
+    print(f"\a\nUnable to read configuration from '{config_file_name}'.\n")
+    sys.exit(3)
+print('Process-specific configuration loaded')
+
+exec_info_dir_candidates = [
+    Path('exec_info'),
+    Path(f'{arg_project_dir}/exec_info'),
+    Path('../exec_info'),
+]
+exec_info_dir = None
+for candidate in exec_info_dir_candidates:
+    if candidate.is_dir():
+        exec_info_dir = str(candidate.resolve())
+        break
+if not exec_info_dir:
+    print(f'Unable to find exec_info directory in any expected location.')
+    sys.exit(3)
+log_file_name = f"{exec_info_dir}" \
+                f"/duckdb_loader-" \
+                f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}" \
+                f".log"
+logging.basicConfig(filename=log_file_name
+                    ,level=logging.INFO
+                    ,format='[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
+                    ,datefmt='%Y-%m-%d %H:%M:%S')
+logger = logging.getLogger(__name__)
+
+print('Logger instantiated')
+
+portfolio_utils = None
+try:
+    config_file_location = None
+    candidates = [
+        Path('logProcessingProject.ini'),
+        Path(f'{arg_portfolio_dir}/src/logProcessingProject.ini'),
+        Path('../../src/logProcessingProject.ini'),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            config_file_location = candidate.resolve()
+            break
+    portfolio_utils = LogExtractXferUtils(config_file_name=config_file_location
+                                          , disable_slack_notifications=(SLACK_NOTIFICATIONS == 'DISABLED'))
+    portfolio_config = portfolio_utils.get_config()
+    print('Shared log processing configuration loaded.')
+    PIPELINE_OUTPUT_DIR = portfolio_config['PIPELINE_OUTPUT_DIR']
+    DUCKDB_PATH = portfolio_config['DUCKDB_PATH']
+    node_dir_list = ast.literal_eval(portfolio_config['NODE_LOG_DIR_LIST'])
+    logger.info("LogExtractXferUtils instantiated.")
+    print('LogExtractXferUtils instantiated.')
+except Exception as e:
+    print(f"Error configuring for startup due to e={str(e)}")
+    logger.critical(f"Error configuring for startup due to e={str(e)}")
+    sys.exit(3)
+print('Portfolio configuration loaded')
+
+source_root = args.source_root if args.source_root is not None else Path(PIPELINE_OUTPUT_DIR)
+duckdb_path = args.duckdb_path if args.duckdb_path is not None else Path(DUCKDB_PATH)
+
 PROGRESS_LOG_INTERVAL = 100
 
-# Table names. "hot tail" / "frozen zone" are still how we talk about these
-# two conceptually (recent + volatile vs. settled + append-only), but the
-# actual DuckDB tables are named per Karl's call:
-HOT_TABLE = "hot_file_download"      # LOADED-backed
-FROZEN_TABLE = "file_download"       # DONE-backed
-# Not explicitly named by Karl -- extending his naming to the ledger too
-# for consistency; flag if you'd rather keep frozen_zone_ledger or want a
-# different name entirely.
+HOT_TABLE = "hot_file_download"
+FROZEN_TABLE = "file_download"
 LEDGER_TABLE = "file_download_ledger"
 
-# Shared column layout for hot_file_download and file_download. Kept
-# explicit rather than inferred from the first file loaded, so schema
-# can't silently drift file-to-file.
 _TABLE_SCHEMA = """
     destination_ip VARCHAR,
     country_code VARCHAR,
@@ -102,7 +206,10 @@ _TABLE_SCHEMA = """
     user_name VARCHAR,
     user_domain VARCHAR,
     user_tld VARCHAR,
-    dataset_uuid VARCHAR,
+    entity_uuid VARCHAR,
+    dataset_type VARCHAR,
+    application_id VARCHAR,
+    entity_type VARCHAR,
     relative_file_path VARCHAR,
     bytes_transferred BIGINT,
     download_date_time TIMESTAMP,
@@ -116,25 +223,16 @@ _TABLE_SCHEMA = """
     source_date VARCHAR
 """
 
-# Explicit schema for read_json, rather than read_json_auto's per-file
-# inference. Discovered live: reading one globus_access_log- (HTTP) file
-# with read_json_auto only inferred 5 columns (dataset_uuid,
-# bytes_transferred, geolocation_info, relative_file_path,
-# download_date_time), missing destination_ip / user_info / protocol /
-# globus_task_id entirely -- then threw a binder error the moment a
-# gridftp.log- (GridFTP) file referenced one of those. Per Karl, protocol
-# should be universally present, so this was likely read_json_auto's
-# sampling missing it in that file rather than a genuine structural gap --
-# but declaring the schema explicitly is the right fix regardless of which
-# it turns out to be: every field's absence resolves to NULL instead of a
-# bind error, for whatever reason it's absent.
 _JSON_COLUMNS_SPEC = (
     "{"
     "'destination_ip': 'VARCHAR', "
     "'geolocation_info': 'STRUCT(country_code VARCHAR, country_name VARCHAR, "
     "region_name VARCHAR, city_name VARCHAR, zip_code VARCHAR)', "
     "'user_info': 'STRUCT(\"user\" VARCHAR, user_domain VARCHAR, user_tld VARCHAR)', "
-    "'dataset_uuid': 'VARCHAR', "
+    "'entity_uuid': 'VARCHAR', "
+    "'dataset_type': 'VARCHAR', "
+    "'application_id': 'VARCHAR', "
+    "'entity_type': 'VARCHAR', "
     "'relative_file_path': 'VARCHAR', "
     "'bytes_transferred': 'BIGINT', "
     "'download_date_time': 'VARCHAR', "
@@ -154,7 +252,10 @@ _INSERT_SELECT = f"""
         user_info."user" AS user_name,
         user_info.user_domain AS user_domain,
         user_info.user_tld AS user_tld,
-        dataset_uuid,
+        entity_uuid,
+        dataset_type,
+        application_id,
+        entity_type,
         relative_file_path,
         bytes_transferred,
         CAST(download_date_time AS TIMESTAMP) AS download_date_time,
@@ -169,14 +270,37 @@ _INSERT_SELECT = f"""
     FROM read_json(?, columns={_JSON_COLUMNS_SPEC}, format='array', ignore_errors=true)
 """
 
-# Same shape as _JSON_COLUMNS_SPEC, but bytes_transferred as VARCHAR --
-# nothing can fail to cast to VARCHAR, so COUNT(*) against this gives the
-# file's TRUE total record count regardless of malformed values, letting
-# us see exactly how many records ignore_errors=true silently dropped
-# rather than leaving that invisible.
 _JSON_COLUMNS_SPEC_COUNT_ONLY = _JSON_COLUMNS_SPEC.replace(
     "'bytes_transferred': 'BIGINT'", "'bytes_transferred': 'VARCHAR'"
 )
+
+
+def verify_configuration_expectations():
+    global node_dir_list
+
+    exit_rather_than_return = False
+    if not source_root.exists():
+        msg=f"Halting program due to not finding source_root at '{source_root}' relative to '{os.getcwd()}'."
+        logger.error(msg)
+        exit_rather_than_return = True
+    if not os.path.exists(exec_info_dir):
+        msg=f"Halting program due to not finding exec_info_dir at '{exec_info_dir}' relative to '{os.getcwd()}'."
+        logger.error(msg)
+        exit_rather_than_return = True
+    if exit_rather_than_return:
+        bad_news = (f":large_green_circle: {portfolio_utils.get_slack_host_context()} :large_green_circle: {PROJECT_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_green_circle:\n"
+                    f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                    f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
+                    f" Halted trying to verify configuration expectations.\n"
+                    f" See the logs.\n"
+                    f" Process logged to {log_file_name}\n"
+                    f"{':large_green_square::skull_and_crossbones: ' * 5}\n"
+                    f":large_green_circle:")
+        logger.error(bad_news)
+        portfolio_utils.postToSlackChannel(channel=SLACK_NOTIFICATION_CHANNEL
+                                           , msg=bad_news
+                                           , mentions_dict=slack_user_id_mentions_on_error_dict)
+        sys.exit(2)
 
 
 def _ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
@@ -205,13 +329,10 @@ def _load_json_into_table(
 ) -> bool:
     json_path = source_root / sm.node / sm.data_filename
     if not json_path.exists():
-        LOGGER.error(
+        logger.error(
             "Expected data file missing for sentinel %s: %s", sm.filename, json_path
         )
         return False
-    # LIMIT is interpolated directly (DuckDB doesn't accept it as a bound
-    # ? parameter) -- safe here since it's an int from argparse, never raw
-    # user/file text.
     limit_clause = f"LIMIT {int(max_rows_per_file)}" if max_rows_per_file else ""
     try:
         con.execute(
@@ -219,20 +340,13 @@ def _load_json_into_table(
             [sm.node, sm.prefix, sm.date, str(json_path)],
         )
     except Exception:
-        # Deliberately non-fatal: one file with an unexpected shape
-        # shouldn't take down a run processing thousands of others.
-        # Full traceback goes to both the console and the exec_info log.
-        LOGGER.exception(
+        logger.exception(
             "Failed to load %s (sentinel %s) into %s -- skipping this file, continuing.",
             json_path, sm.filename, table,
         )
         return False
 
     if max_rows_per_file is None:
-        # Visibility into ignore_errors=true's silent drops: compare the
-        # row count actually inserted for this file against its TRUE total
-        # record count (bytes_transferred read as VARCHAR, so nothing can
-        # fail to cast) -- rather than leaving the skip count invisible.
         try:
             inserted = con.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE source_node = ? "
@@ -246,12 +360,12 @@ def _load_json_into_table(
             ).fetchone()[0]
             skipped = true_total - inserted
             if skipped > 0:
-                LOGGER.warning(
+                logger.warning(
                     "%s: %d of %d records skipped by ignore_errors (malformed values)",
                     json_path, skipped, true_total,
                 )
         except Exception:
-            LOGGER.exception(
+            logger.exception(
                 "Unable to verify record count for %s -- the load itself "
                 "succeeded, but this skip-count visibility check failed.",
                 json_path,
@@ -265,7 +379,7 @@ def rebuild_hot_tail(
     source_root: Path,
     max_rows_per_file: int | None = None,
 ) -> None:
-    LOGGER.info("Wiping hot tail (%d LOADED files to reload)", len(loaded_matches))
+    logger.info("Wiping hot tail (%d LOADED files to reload)", len(loaded_matches))
     con.execute(f"DELETE FROM {HOT_TABLE}")
     loaded_ok = 0
     t_progress = time.perf_counter()
@@ -275,11 +389,11 @@ def rebuild_hot_tail(
             loaded_ok += 1
         if idx % PROGRESS_LOG_INTERVAL == 0 or idx == total:
             elapsed = time.perf_counter() - t_progress
-            LOGGER.info(
+            logger.info(
                 "Hot tail progress: %d/%d files (%.1fs elapsed, %.1f files/sec)",
                 idx, total, elapsed, idx / elapsed if elapsed > 0 else 0,
             )
-    LOGGER.info("Hot tail rebuilt: %d/%d files loaded", loaded_ok, total)
+    logger.info("Hot tail rebuilt: %d/%d files loaded", loaded_ok, total)
 
 
 def _load_ledger(
@@ -324,7 +438,7 @@ def process_frozen_zone(
         prior = ledger.get(sm.logical_key)
 
         if prior is None:
-            LOGGER.info("New file_download file: %s", sm.filename)
+            logger.info("New file_download file: %s", sm.filename)
             con.execute(
                 f"DELETE FROM {FROZEN_TABLE} WHERE source_node = ? AND source_prefix = ? "
                 "AND source_date = ?",
@@ -341,7 +455,7 @@ def process_frozen_zone(
 
         elif is_sequential_extension(prior[0], sm.phases):
             prior_filename = prior[1]
-            LOGGER.info(
+            logger.info(
                 "Reloading %s: sentinel extended from %s to %s",
                 sm.logical_key, prior_filename, sm.filename,
             )
@@ -358,20 +472,16 @@ def process_frozen_zone(
 
         else:
             prior_filename = prior[1]
-            LOGGER.error(
+            logger.error(
                 "Unexpected sentinel change for %s: recorded=%s current=%s "
                 "(not an unbroken sequential extension)",
                 sm.logical_key, prior_filename, sm.filename,
             )
             error_count += 1
 
-        # Unconditional -- NOT skipped by any branch above (no continue
-        # statements in this loop), since on this very first run every file
-        # hits the "new" branch and a skippable progress check would never
-        # fire at all.
         if idx % PROGRESS_LOG_INTERVAL == 0 or idx == total:
             elapsed = time.perf_counter() - t_progress
-            LOGGER.info(
+            logger.info(
                 "Frozen zone progress: %d/%d files (%.1fs elapsed, %.1f files/sec) -- "
                 "%d new, %d reloaded, %d unchanged, %d errors so far",
                 idx, total, elapsed, idx / elapsed if elapsed > 0 else 0,
@@ -382,93 +492,36 @@ def process_frozen_zone(
     missing_count = 0
     for logical_key, (_phases, filename) in ledger.items():
         if logical_key not in current_keys:
-            LOGGER.error(
+            logger.error(
                 "Ledger entry %s (sentinel=%s) has no matching DONE file on this run",
                 logical_key, filename,
             )
             missing_count += 1
 
     total_errors = error_count + missing_count
-    LOGGER.info(
+    logger.info(
         "Frozen zone: %d new, %d reloaded, %d unchanged, %d errors"
         "(%d ledger entries with no current match, %d other)",
         new_count, reload_count, noop_count, total_errors, missing_count, error_count,
     )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Load globus-downloads-to-JSON output into DuckDB"
-    )
-    parser.add_argument(
-        "--source-root", type=Path, default=None,
-        help="Override PIPELINE_OUTPUT_DIR. Mainly for pointing at synthetic "
-             "fixtures during testing.",
-    )
-    parser.add_argument(
-        "--duckdb-path", type=Path, default=None,
-        help="Override DUCKDB_PATH from the shared config.",
-    )
-    parser.add_argument(
-        "--max-rows-per-file", type=int, default=None,
-        help="TESTING ONLY: load at most this many records from each source "
-             "JSON file, silently dropping the rest. Defaults to unlimited. "
-             "Never pass this for a real production run.",
-    )
-    parser.add_argument("--log-level", default="INFO")
-    args = parser.parse_args()
+if __name__ == '__main__':
+    msg =   f":large_green_circle: {portfolio_utils.get_slack_host_context()} :large_green_circle: {PROJECT_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_green_circle:\n" \
+            f"{SLACK_NEUTRAL_INFO_EMOJI} Launched to load Duck DB at {duckdb_path}" \
+            f"  using JSON files at {PIPELINE_OUTPUT_DIR}.\n" \
+            f" Process logging to {log_file_name}\n" \
+            f":large_green_circle:"
+    logger.info(msg)
+    portfolio_utils.postToSlackChannel(channel=SLACK_NOTIFICATION_CHANNEL
+                                     , msg=msg)
 
-    try:
-        own_config = load_own_config()
-    except FileNotFoundError as e:
-        print(f"\a\n{e}\n")
-        return 3
-
-    try:
-        shared_config = load_shared_config()
-    except FileNotFoundError as e:
-        print(f"\a\n{e}\n")
-        return 3
-
-    source_root = args.source_root if args.source_root is not None else Path(
-        shared_config["PIPELINE_OUTPUT_DIR"]
-    )
-    duckdb_path = args.duckdb_path if args.duckdb_path is not None else Path(
-        shared_config["DUCKDB_PATH"]
-    )
-    node_dir_list = shared_config["NODE_LOG_DIR_LIST"]
-
-    try:
-        exec_info_dir = find_exec_info_dir(
-            shared_config["PROJECT_HIVE_DIR"], own_config["PROC_NAME"]
-        )
-    except FileNotFoundError as e:
-        print(f"\a\n{e}\n")
-        return 3
-
-    log_file_name = (
-        f"{exec_info_dir}/duckdb_loader-{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.log"
-    )
-    # Logs to both the exec_info file (matching portfolio convention) and
-    # the console (NOT in geolocation_details_updater.py, which is file-only
-    # plus separate print() calls) -- added so timing/size numbers are
-    # visible during an interactive run without tailing the log file. Say
-    # if you'd rather match the file-only + print() style exactly instead.
-    formatter = logging.Formatter(
-        "[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    file_handler = logging.FileHandler(log_file_name)
-    file_handler.setFormatter(formatter)
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logging.basicConfig(level=args.log_level, handlers=[file_handler, stream_handler])
-    LOGGER.info("Logging to %s", log_file_name)
+    verify_configuration_expectations()
 
     t_start = time.perf_counter()
 
     if args.max_rows_per_file is not None:
-        LOGGER.warning(
+        logger.warning(
             "--max-rows-per-file=%d is set -- this is a TESTING run that "
             "silently truncates every file. Do not treat resulting row "
             "counts as real.",
@@ -479,28 +532,37 @@ def main() -> int:
     for node in node_dir_list:
         node_dir = source_root / node
         if not node_dir.is_dir():
-            LOGGER.warning("Node directory not found, skipping: %s", node_dir)
+            logger.warning("Node directory not found, skipping: %s", node_dir)
             continue
         all_matches.extend(scan_node_directory(node, node_dir))
 
-    LOGGER.info(
+    logger.info(
         "Scanned %d sentinel matches across %d configured node directories",
         len(all_matches), len(node_dir_list),
     )
 
-    # Step 1, moved to the front per Karl's call: fail fast, before touching
-    # DuckDB or the hot tail, if any duplicate matches are found.
     t_validate = time.perf_counter()
     dup_errors = validate_no_duplicates(all_matches)
     if dup_errors:
-        for msg in dup_errors:
-            LOGGER.error(msg)
-        LOGGER.error(
+        for dup_msg in dup_errors:
+            logger.error(dup_msg)
+        logger.error(
             "%d duplicate sentinel match(es) found; exiting before touching DuckDB.",
             len(dup_errors),
         )
-        return 1
-    LOGGER.info("Duplicate-match validation clean (%.3fs)", time.perf_counter() - t_validate)
+        bad_news = (f":large_green_circle: {portfolio_utils.get_slack_host_context()} :large_green_circle: {PROJECT_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_green_circle:\n"
+                    f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                    f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
+                    f" {len(dup_errors)} duplicate sentinel match(es) found. See the logs.\n"
+                    f" Process logged to {log_file_name}\n"
+                    f"{':large_green_square::skull_and_crossbones: ' * 5}\n"
+                    f":large_green_circle:")
+        logger.error(bad_news)
+        portfolio_utils.postToSlackChannel(channel=SLACK_NOTIFICATION_CHANNEL
+                                           , msg=bad_news
+                                           , mentions_dict=slack_user_id_mentions_on_error_dict)
+        sys.exit(1)
+    logger.info("Duplicate-match validation clean (%.3fs)", time.perf_counter() - t_validate)
 
     duckdb_path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(duckdb_path))
@@ -511,24 +573,33 @@ def main() -> int:
 
     t_hot = time.perf_counter()
     rebuild_hot_tail(con, loaded_matches, source_root, args.max_rows_per_file)
-    LOGGER.info("Hot tail rebuild took %.3fs", time.perf_counter() - t_hot)
+    logger.info("Hot tail rebuild took %.3fs", time.perf_counter() - t_hot)
 
     t_frozen = time.perf_counter()
     process_frozen_zone(con, done_matches, source_root, args.max_rows_per_file)
-    LOGGER.info("Frozen zone processing took %.3fs", time.perf_counter() - t_frozen)
+    logger.info("Frozen zone processing took %.3fs", time.perf_counter() - t_frozen)
 
     hot_count = con.execute(f"SELECT COUNT(*) FROM {HOT_TABLE}").fetchone()[0]
     frozen_count = con.execute(f"SELECT COUNT(*) FROM {FROZEN_TABLE}").fetchone()[0]
     con.close()
 
+    process_utc_finish = datetime.now(tz_utc)
     db_size_mb = duckdb_path.stat().st_size / (1024 * 1024)
-    LOGGER.info(
-        "Done in %.3fs total. %s=%d rows, %s=%d rows, duckdb file size=%.1f MB",
-        time.perf_counter() - t_start, HOT_TABLE, hot_count, FROZEN_TABLE, frozen_count,
-        db_size_mb,
-    )
-    return 0
+    good_news = (f":large_green_circle: {portfolio_utils.get_slack_host_context()} :large_green_circle: {PROJECT_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_green_circle:\n"
+                 f"{SLACK_GOOD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                 f" finished at {process_utc_finish.strftime('%Y-%m-%d %H:%M:%S %Z')} after"
+                 f" {int((process_utc_finish - process_utc_start).total_seconds() // 60)} minutes.\n"
+                 f" {HOT_TABLE}={hot_count} rows, {FROZEN_TABLE}={frozen_count} rows,"
+                 f" duckdb file size={db_size_mb:.1f} MB.\n"
+                 f" Process logged to {log_file_name}\n"
+                 f"{':green_heart: ' * 5}\n"
+                 f":large_green_circle:")
+    logger.info(good_news)
+    try:
+        portfolio_utils.postToSlackChannel(channel=SLACK_NOTIFICATION_CHANNEL
+                                           , msg=good_news
+                                           , mentions_dict=slack_user_id_mentions_on_success_dict)
+    except Exception as e:
+        logger.exception('Unable to post Slack success notification.')
 
-
-if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(0)

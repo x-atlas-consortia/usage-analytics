@@ -1,5 +1,5 @@
 [ProcessSpecificSettings]
-PROC_NAME=analytics-platform-loading
+PROJECT_NAME=analytics-platform-loading
 
 SLACK_NOTIFICATION_CHANNEL=log-processing
 SLACK_BAD_NEWS_EMOJI=:bangbang:
