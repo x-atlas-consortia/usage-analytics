@@ -1,5 +1,5 @@
 [ProcessSpecificSettings]
-PROC_NAME=portfolio-monitoring
+PROJECT_NAME=portfolio-monitoring
 SLACK_NOTIFICATION_CHANNEL=log-processing
 SLACK_BAD_NEWS_EMOJI=:bangbang:
 SLACK_NEUTRAL_NEWS_EMOJI=:neutral_face:
@@ -9,25 +9,25 @@ SLACK_BAD_ITEM_EMOJI=:heavy_minus_sign:
 SLACK_NEUTRAL_ITEM_EMOJI=:heavy_equals_sign:
 SLACK_GOOD_ITEM_EMOJI=:heavy_plus_sign:
 SLACK_NOTIFICATIONS=ENABLED
-SLACK_USER_ID_MENTIONS_ON_ERROR={'Karl Burke': 'U03ADFJB7DF'}
-SLACK_USER_ID_MENTIONS_ON_SUCCESS={'Karl Burke': 'U03ADFJB7DF'}
+SLACK_USER_ID_MENTIONS_ON_ERROR={}
+SLACK_USER_ID_MENTIONS_ON_SUCCESS={}
 
-# Comma-separated list of keys to monitor. Each key must already be exposed by
-# LogExtractXferUtils.get_config() -- i.e. declared in the shared logProcessingProject.ini's
-# [LocalServerSettings] section. This monitor resolves each key's *path* from there at startup;
-# it never keeps its own copy of a path, so there's nothing here that can drift out of sync
-# with the actual source of truth. Each key listed here must also have its own [KEY_NAME]
-# section below, declaring FILE_SIZE_CHARACTERISTIC and STALE_THRESHOLD_HOURS.
+# Comma-separated list of keys to monitor.
+# Each key must already be exposed by LogExtractXferUtils.get_config() -- i.e.
+# declared in the shared logProcessingProject.ini's [LocalServerSettings] section.
+#
+# Keys listed here must also have a [KEY_NAME] section below, declaring characteristics
+# to monitor as follows:
+#
+# FILE_SIZE_CHARACTERISTIC=APPEND_ONLY -- the referenced file should only grow between
+# deliveries. Shrinking is not expected.
+# FILE_SIZE_CHARACTERISTIC=VARIABLE -- the referenced file may occasionally be
+# replaced (e.g. a downloaded reference database). Growing and shrinking are normal.
+# STALE_THRESHOLD_HOURS -- the referenced file is considered stale when its mtime has not
+# been update over this time period e.g. an expected replacement file has not been delivered.
 [MonitoredFiles]
 FILE_KEYS=TRANSFER_DETAIL_FILE,NONPUBLIC_GEO_DB
 
-# See 
-# FILE_SIZE_CHARACTERISTIC=APPEND_ONLY -- this file should only ever grow between deliveries. Shrinking is
-#   always treated as bad news (an alert, same severity as staleness). Growing is good news,
-#   reported with a line-count delta.
-# FILE_SIZE_CHARACTERISTIC=VARIABLE -- this file is periodically replaced wholesale (e.g. a downloaded
-#   reference database). Growing or shrinking is normal and reported as neutral info only,
-#   never an alert. Staleness is still always an alert, regardless of FILE_SIZE_CHARACTERISTIC.
 [TRANSFER_DETAIL_FILE]
 FILE_SIZE_CHARACTERISTIC=APPEND_ONLY
 # Deliveries land roughly once a day, so this defaults to a day plus a one-hour grace window.

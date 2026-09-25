@@ -16,8 +16,7 @@ from log_extract_xfer_utils import LogExtractXferUtils
 # File locations to monitor are pulled from the [LocalServerSettings] section of the
 # portfolio's logProcessingProject.ini file, although this could be extended to pull
 # file locations from the configuration of other projects within log-processing.
-# Locactions are NOT specified in the INI file of this project.
-#
+# Locations are NOT specified in the INI file of this project.
 
 tz_utc = ZoneInfo("UTC")
 process_utc_start = datetime.now(tz_utc)
@@ -26,14 +25,14 @@ print('Monitoring delivery of portfolio data source files')
 
 # Handle arguments
 arg_parser = argparse.ArgumentParser(description='Monitor delivery of one or more portfolio data source files.')
-arg_parser.add_argument('--process-dir', required=True, dest='process_dir',
-                         help="This process's own directory (one level above src/), e.g."
+arg_parser.add_argument('--project-dir', required=True, dest='project_dir',
+                         help="This projects's own directory (one level above src/), e.g."
                               " .../log-processing/portfolio-monitoring. Normally supplied"
-                              " by the .sh wrapper's own PROCESS_DIR.")
+                              " by the .sh wrapper's own PROJECT_DIR.")
 args = arg_parser.parse_args()
 # Expect an argument for the path for this project passed in from the invoking shell script
-arg_process_dir = args.process_dir
-arg_portfolio_dir = os.path.dirname(arg_process_dir)  # one level above arg_process_dir
+arg_project_dir = args.project_dir
+arg_portfolio_dir = os.path.dirname(arg_project_dir)  # one level above arg_project_dir
 
 #
 # Read configuration from the project INI file and set global constants
@@ -42,7 +41,7 @@ Config = configparser.ConfigParser()
 
 process_ini_candidates = [
     Path('file_data_source_monitor.ini'),                                    # Docker WORKDIR
-    Path(f'{arg_process_dir}/src/file_data_source_monitor.ini'),             # vm001/dtn03 default
+    Path(f'{arg_project_dir}/src/file_data_source_monitor.ini'),             # vm001/dtn03 default
     Path('../../portfolio-monitoring/src/file_data_source_monitor.ini'),     # PyCharm dev
 ]
 config_file_name = None
@@ -61,7 +60,7 @@ Config.read(config_file_name)
 FILE_SIZE_CHARACTERISTICS = ('VARIABLE', 'APPEND_ONLY')
 
 try:
-    PROC_NAME = Config.get('ProcessSpecificSettings', 'PROC_NAME')
+    PROJECT_NAME = Config.get('ProcessSpecificSettings', 'PROJECT_NAME')
     SLACK_NOTIFICATION_CHANNEL = Config.get('ProcessSpecificSettings', 'SLACK_NOTIFICATION_CHANNEL')
     SLACK_BAD_NEWS_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_BAD_NEWS_EMOJI')
     SLACK_NEUTRAL_NEWS_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_NEUTRAL_NEWS_EMOJI')
@@ -105,9 +104,9 @@ print('Process-specific configuration loaded')
 # Set up a logger in the configured directory for the current execution.
 #
 exec_info_dir_candidates = [
-    Path('exec_info'),                                    # Docker WORKDIR
-    Path(f'{arg_process_dir}/exec_info'),                 # vm001/dtn03 default
-    Path(f'../../{PROC_NAME}/exec_info'),                 # PyCharm dev
+    Path('exec_info'),                       # Docker WORKDIR
+    Path(f'{arg_project_dir}/exec_info'),    # vm001/dtn03 default
+    Path(f'../../{PROJECT_NAME}/exec_info'), # PyCharm dev
 ]
 exec_info_dir = None
 for candidate in exec_info_dir_candidates:
@@ -122,7 +121,7 @@ log_file_name = f"{exec_info_dir}" \
                 f"{datetime.now().strftime('%Y-%m-%d_%H%M%s')}" \
                 f".log"
 logging.basicConfig(filename=log_file_name
-                    ,level=logging.DEBUG+1 # INFO
+                    ,level=logging.INFO
                     ,format='[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
                     ,datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -133,9 +132,9 @@ portfolio_utils = None
 try:
     config_file_location = None
     candidates = [
-        Path('logProcessingProject.ini'),                                    # Docker WORKDIR
-        Path(f'{arg_portfolio_dir}/src/logProcessingProject.ini'),          # vm001/dtn03 default
-        Path('../../src/logProcessingProject.ini'),                          # PyCharm dev
+        Path('logProcessingProject.ini'),                          # Docker WORKDIR
+        Path(f'{arg_portfolio_dir}/src/logProcessingProject.ini'), # vm001/dtn03 default
+        Path('../../src/logProcessingProject.ini'),                # PyCharm dev
     ]
     for candidate in candidates:
         if candidate.is_file():
@@ -169,11 +168,11 @@ except Exception as e:
     sys.exit(3)
 print('Portfolio configuration loaded; resolved paths for: ' + ', '.join(FILE_KEYS))
 
-# State for this script is in a JSON file in the same directory as this script. The state
-# file is keyed by FILE_KEY, tracking only what's needed to compare "today" against
-# "yesterday" for each monitored file.
+# State for this script is in a JSON file in the same directory as this script.
+# The state file is keyed by FILE_KEY, tracking only what's needed to compare
+# "today" against "yesterday" for each monitored file.
 # Written once per run, after every file has been checked.
-STATE_FILE = str(Path(arg_process_dir) / 'src' / 'file_data_source_monitor_state.json')
+STATE_FILE = str(Path(arg_project_dir) / 'src' / 'file_data_source_monitor_state.json')
 
 def load_state() -> dict:
     if not os.path.isfile(STATE_FILE):
@@ -186,10 +185,6 @@ def save_state(all_state: dict):
     with open(STATE_FILE, 'w') as f:
         json.dump(all_state, f, indent=2)
 
-
-        # Setting occasionally used for debugging. Could be passed in if usage expanded.
-verbose=True
-
 # Verify any expectations about the configuration are valid. Print
 # messages for each expectation not met and halt if there are any.
 def verify_configuration_expectations():
@@ -201,7 +196,7 @@ def verify_configuration_expectations():
               f"'{exec_info_dir}' relative to '{os.getcwd()}'.")
         exit_rather_than_return = True
     if exit_rather_than_return:
-        bad_news = (f":package: {portfolio_utils.get_slack_host_context()} :package: {PROC_NAME} :diamonds: {Path(__file__).name} :package:\n"
+        bad_news = (f":package: {portfolio_utils.get_slack_host_context()} :package: {PROJECT_NAME} :diamonds: {Path(__file__).name} :package:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
                     f" Halted trying to verify configuration expectations.\n"
@@ -214,10 +209,9 @@ def verify_configuration_expectations():
                                            , msg=bad_news
                                            , mentions_dict=slack_user_id_mentions_on_error_dict)
         sys.exit(2)
-        
 
 
-# Deliberately simple counting of newlines by iterating the file as bytes, no parsing.
+# Deliberately simple counting of newlines by iterating the file as bytes without parsing.
 # Cheap enough even at ~800MB (a few seconds), and no current need for anything more elaborate.
 def count_lines(path: str) -> int:
     count = 0
@@ -230,14 +224,11 @@ def count_lines(path: str) -> int:
 # Evaluate a single monitored file.  Read-only inspection (exists/access/stat) of the
 # monitored file at the path given.
 #
-# file_size_characteristic governs how a size change is classified:
-#   APPEND_ONLY -- the file should only ever grow between deliveries. Shrinking always lands in
-#                  halt_reasons (a problem, same severity as staleness). Growing is a delivery.
-#   VARIABLE    -- the file is periodically replaced wholesale (e.g. a downloaded reference
-#                  database). Both growing and shrinking are normal and never land in
-#                  halt_reasons -- callers report either as a (neutral) delivery instead.
-# Staleness (no new delivery within stale_threshold_hours) is always a halt_reason, regardless
-# of file_size_characteristic.
+# file_size_characteristic governs how a size change is classified.  See the description of
+# APPEND_ONLY and VARIABLE values for FILE_SIZE_CHARACTERISTIC in file_data_source_monitor.ini.
+#
+# stale_threshold_hours governs when a monitored file may be considered outdated (no new
+# delivery within specified hours.
 #
 # Returns a dict describing what was found. Callers decide what to do about it.
 def evaluate_file_status(path: str, stale_threshold_hours: float, file_size_characteristic: str,
@@ -292,7 +283,7 @@ def evaluate_file_status(path: str, stale_threshold_hours: float, file_size_char
             result['eval_findings'].append(
                 f"File size decreased from {prior_state['size']:,} to {size:,} bytes"
             )
-        # VARIABLE: shrink is expected/benign for a periodically-replaced file -- no
+        # elif VARIABLE: shrink is expected/benign for a periodically-replaced file -- no
         # halt_reason. Still surfaced as a (neutral) delivery by the caller below.
     elif size > prior_state['size']:
         result['grew'] = True
@@ -305,7 +296,7 @@ def evaluate_file_status(path: str, stale_threshold_hours: float, file_size_char
 
 
 if __name__ == '__main__':
-    header = (f":package: {portfolio_utils.get_slack_host_context()} :package: {PROC_NAME}"
+    header = (f":package: {portfolio_utils.get_slack_host_context()} :package: {PROJECT_NAME}"
               f" :diamonds: {Path(__file__).name} :package:\n")
 
     launch_msg = (header +
@@ -371,7 +362,6 @@ if __name__ == '__main__':
             'prior_state': prior_state,
         }
 
-    logger.info(f"KBKBKB-per_file_findings={str(per_file_findings)}")
     save_state(all_new_state)
 
     # Nothing went wrong anywhere -- every file in FILE_KEYS is in per_file_findings.
