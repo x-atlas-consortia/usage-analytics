@@ -1,0 +1,9 @@
+apachelogs
+bidict
+duckdb
+neo4j
+PyYAML==6.0
+requests>=2.26.0
+# Pin old packages for Python 3.9 on vm001 until move to Docker or new server
+boto3==1.40.76
+python-dotenv==1.2.1
