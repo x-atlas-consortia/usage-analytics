@@ -1,3 +1,29 @@
+"""
+Extraction and transformation of Globus HTTP file transfers for the
+globus-downloads-to-JSON pipeline's File Downloads.  Output is to JSON
+files sourced by a load process.
+
+N.B. This ETL of File Downloads logged file transfers is assumed
+     to be a nightly process, even if delivery of data means there are
+     many nights with little or no change (e.g. six nights each week of
+     no new globus_access_* log delivery.)
+
+N.B. The ETL processes all logged file download events that it can,
+     without being restrained by the delivery dates of other data, such
+     as the Globus Usage Details spreadsheet.  Therefore placeholder values
+     are inserted where later phases of this pipeline may add information
+     like the user's identity or geolocation information derived from the
+     IP address logged for a file transfer.
+
+Sentinel files should exist along with each JSON file with file transfer
+content.  Comments in the analytics-platform-loading loading process
+describe the loader's interpretation of sentinel files.  This
+globus-downloads-to-JSON process's manipulation of sentinel files is
+described in the comments of the gridftp_log_extract.py file.
+
+The content JSON files this process creates may contain information not
+loaded into the DuckDB tables, notably the `provenance` field.
+"""
 import os
 import argparse
 import subprocess
@@ -27,29 +53,41 @@ process_utc_start = datetime.now(tz_utc)
 epoch_utc = datetime.strptime('1970-01-01T00:00:00.000Z','%Y-%m-%dT%H:%M:%S.%fZ').astimezone(tz_utc)
 
 print('Processing file transfer entries in Globus logs')
-#
-# arg_process_dir replaces the old hardcoded HIVE_DEPLOY_BASE. It's the .sh wrapper's own
-# BASH_SOURCE-derived PROCESS_DIR (e.g. .../log-processing/globus-downloads-to-JSON), passed
-# in explicitly rather than guessed at, so moving this whole tree to a new server or a new
-# repository never requires touching this file's own content.
+
+# This script's own Slack header emoji: derived from its parent directory name
+# ('phase1' -> ':one:'), so relocating a script to a different phase directory
+# automatically updates its emoji with no code change. Falls back to ':diamonds:'
+# if the parent directory doesn't match the 'phaseN' pattern.
+_PHASE_NUMBER_WORDS = {1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine'}
+_phase_dir_match = re.match(r'^phase(\d+)$', Path(__file__).resolve().parent.name)
+if _phase_dir_match and int(_phase_dir_match.group(1)) in _PHASE_NUMBER_WORDS:
+    SLACK_PHASE_EMOJI = f":{_PHASE_NUMBER_WORDS[int(_phase_dir_match.group(1))]}:"
+else:
+    SLACK_PHASE_EMOJI = ':diamonds:'
+
+# arg_project_dir is provided as an argument by the .sh wrapper calling this program from
+# its BASH_SOURCE-derived PROJECT_DIR (e.g. globus-downloads-to-JSON).
 arg_parser = argparse.ArgumentParser(description='Extract Globus HTTP access log file-transfer entries to JSON.')
-arg_parser.add_argument('--process-dir', required=True, dest='process_dir',
+arg_parser.add_argument('--project-dir', required=True, dest='project_dir',
                          help="This process's own directory (one level above src/), e.g."
                               " .../log-processing/globus-downloads-to-JSON. Normally supplied"
-                              " by the .sh wrapper's own PROCESS_DIR.")
+                              " by the .sh wrapper's own PROJECT_DIR.")
 args = arg_parser.parse_args()
-arg_process_dir = args.process_dir
-arg_portfolio_dir = os.path.dirname(arg_process_dir)  # one level above arg_process_dir
+arg_project_dir = args.project_dir
+arg_portfolio_dir = os.path.dirname(arg_project_dir)  # one level above arg_project_dir
 
 #
 # Read configuration from the project INI file and set global constants
 #
 Config = configparser.ConfigParser()
 
+# NOTE: this script lives one directory deeper than before (src/phase1/, not src/
+# directly), so its own vm001-default candidate needs the extra phase1/ segment, and
+# the PyCharm-dev candidate needs an extra '../' level.
 process_ini_candidates = [
-    Path('globus_access_log_extract.ini'),                                    # Docker WORKDIR
-    Path(f'{arg_process_dir}/src/globus_access_log_extract.ini'),             # vm001 default
-    Path('../../globus-downloads-to-JSON/src/globus_access_log_extract.ini'), # PyCharm dev
+    Path('globus_access_log_extract.ini'),                                              # Docker WORKDIR
+    Path(f'{arg_project_dir}/src/phase1/globus_access_log_extract.ini'),                # vm001 default
+    Path('../../../globus-downloads-to-JSON/src/phase1/globus_access_log_extract.ini'), # PyCharm dev
 ]
 config_file_name = None
 for candidate in process_ini_candidates:
@@ -61,11 +99,10 @@ if not config_file_name:
     sys.exit(3)
 Config.read(config_file_name)
 try:
-    # The PROC_NAME pulled from the INI file should match the script variable PROCESS_DIR
+    # The PROJECT_NAME pulled from the INI file should match the script variable PROJECT_DIR
     # in the bash script executing this program.
-    PROC_NAME = Config.get('ProcessSpecificSettings', 'PROC_NAME')
+    PROJECT_NAME = Config.get('ProcessSpecificSettings', 'PROJECT_NAME')
     LOG_FILE_NIGHTLY_DIR = Config.get('ProcessSpecificSettings', 'LOG_FILE_NIGHTLY_DIR')
-    NODE_LOG_DIR_LIST = Config.get('ProcessSpecificSettings', 'NODE_LOG_DIR_LIST')
     SLACK_NOTIFICATION_CHANNEL = Config.get('ProcessSpecificSettings', 'SLACK_NOTIFICATION_CHANNEL')
     SLACK_BAD_NEWS_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_BAD_NEWS_EMOJI')
     SLACK_GOOD_NEWS_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_GOOD_NEWS_EMOJI')
@@ -80,12 +117,12 @@ print('Process-specific configuration loaded')
 
 #
 # Set up a logger in the configured directory for the current execution.
-# exec_info is at PROCESS_DIR/exec_info, where PROCESS_DIR is one level above src/.
+# exec_info is at PROJECT_DIR/exec_info, where PROJECT_DIR is one level above src/.
 #
 exec_info_dir_candidates = [
-    Path('exec_info'),                                                             # Docker WORKDIR
-    Path(f'{arg_process_dir}/exec_info'),                 # vm001 default
-    Path(f'../../{PROC_NAME}/exec_info'),                 # PyCharm dev
+    Path('exec_info'),                          # Docker WORKDIR
+    Path(f'{arg_project_dir}/exec_info'),       # vm001 default
+    Path(f'../../../{PROJECT_NAME}/exec_info'), # PyCharm dev
 ]
 exec_info_dir = None
 for candidate in exec_info_dir_candidates:
@@ -100,7 +137,7 @@ log_file_name = f"{exec_info_dir}" \
                 f"{datetime.now().strftime('%Y-%m-%d_%H%M%s')}" \
                 f".log"
 logging.basicConfig(filename=log_file_name
-                    ,level=logging.DEBUG+1 # INFO
+                    ,level=logging.INFO
                     ,format='[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
                     ,datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -111,9 +148,9 @@ portfolio_utils = None
 try:
     config_file_location = None
     candidates = [
-        Path('logProcessingProject.ini'),                                    # Docker WORKDIR
-        Path(f'{arg_portfolio_dir}/src/logProcessingProject.ini'),           # vm001 default
-        Path('../../src/logProcessingProject.ini'),                          # PyCharm dev
+        Path('logProcessingProject.ini'),                          # Docker WORKDIR
+        Path(f'{arg_portfolio_dir}/src/logProcessingProject.ini'), # vm001 default
+        Path('../../../src/logProcessingProject.ini'),             # PyCharm dev
     ]
     for candidate in candidates:
         if candidate.is_file():
@@ -124,6 +161,7 @@ try:
     portfolio_config = portfolio_utils.get_config()
     print('Shared log processing configuration loaded.')
     JSON_FILE_NIGHTLY_DIR = portfolio_config['JSON_FILE_NIGHTLY_DIR']
+    node_dir_list = ast.literal_eval(portfolio_config['NODE_LOG_DIR_LIST'])
     logger.info("LogExtractXferUtils instantiated.")
     print('LogExtractXferUtils instantiated.')
 except Exception as e:
@@ -139,12 +177,8 @@ print('Portfolio configuration loaded')
 node_log_pcre_pattern=re.compile(r'^globus_access_log-\d{8}$')
 node_json_pcre_pattern=re.compile(r'^globus_access_log-\d{8}\.json$')
 
-# Create a usable Python list global from the str in the INI file
-node_dir_list = ast.literal_eval(NODE_LOG_DIR_LIST)
-
 # Create a parser for Apache access log lines
 aal_parser = LogParser('%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"')
-
 # # List of regular expressions used to match the "payload" section of an "access log" line i.e.
 # g-d00e7b.09193a.5898.dn.glob.us:af603d86-eab9-4eec-bb1d-9d26556741bb 62.192.175.142 - [19/Apr/2025:00:29:24 -*      48 0400] "GET /c95d9373d698faf60a66ffdc27499fe1/drv_CX_20-008_lymphnode_n10_reg001/processed_2020-12-2320-008LNn10r001/segm/segm-1/f*      48 cs/compensated/LN7910_20_008_11022020_reg001_compensated.csv?download=1 HTTP/1.1" 200 803 "-" "Mozilla/5.0 (Macintosh; Intel Mac *      48 OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 # The default log format for Apache access logs, known as the Common Log Format (CLF), is: %h %l %u %t "r" %>s %b. This format includes the remote host (IP address), user identity, username, request time, request line, status code, and response size. 
@@ -184,7 +218,7 @@ def verify_configuration_expectations():
         exit_rather_than_return = True
     for node_dir in node_dir_list:
         node_log_dir_fullpath = f"{LOG_FILE_NIGHTLY_DIR}{os.sep}{node_dir}{os.sep}httpd"
-        node_json_dir_fullpath = f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}{os.sep}{node_dir}"
+        node_json_dir_fullpath = f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROJECT_NAME}{os.sep}{node_dir}"
         if not os.path.exists(node_log_dir_fullpath):
             print(f"Halting program due to not finding an expected node log directory at "
                   f"'{node_log_dir_fullpath}'")
@@ -194,7 +228,7 @@ def verify_configuration_expectations():
                   f"'{node_json_dir_fullpath}'")
             exit_rather_than_return = True
     if exit_rather_than_return:
-        bad_news = (f":large_orange_circle: {portfolio_utils.get_slack_host_context()} :large_orange_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_orange_circle:\n"
+        bad_news = (f":large_orange_circle: {portfolio_utils.get_slack_host_context()} :large_orange_circle: {PROJECT_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_orange_circle:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
                     f" Halted trying to verify configuration expectations.\n"
@@ -246,31 +280,26 @@ def create_dict_by_session_from_log_lines(log_file_lines:list[str], provenance_d
         try:
             log_entry=aal_parser.parse(logFileLine)
             if log_entry.final_status < 200 or log_entry.final_status > 299:
-                # We're only creating ElasticSearch documents for successful transfers
+                # We're only tracking successful transfers
                 continue
             is_data_transfer_line = False
             for regex in RETAIN_LINE_RE_LIST:
                 if re.match(regex, log_entry.request_line):
                     is_data_transfer_line = True
             if not is_data_transfer_line:
-                # We're only creating ElasticSearch documents for transfers from our
-                # recognized data locations.
+                # We're only tracking transfers from our recognized data locations.
                 continue
-            logger.debug(f"KBKBKB log_entry={str(log_entry)}")
-            logger.debug([attr for attr in dir(log_entry) if not attr.startswith('_')])
-            #iso8601_request_time = log_entry.request_time_fields['timestamp'].isoformat().replace('+00:00', 'Z')
-            #request_dt = datetime(log_entry.request_time_fields['timestamp'], tzinfo=tz_pgh)
-            # HTTP access logs never carry a real user identity when %u comes back empty, '-', or
-            # None (the parser's representation of the CLF '-' placeholder varies, so all three are
-            # treated the same here). UNTRACKED marks this as structurally unavailable for this
-            # protocol, distinct from gridftp's 'TBD' (pending resolution) and 'NOT_FOUND' (task id).
+
             remote_user = log_entry.remote_user
             clf_user = remote_user if remote_user not in (None, '', '-') else 'UNTRACKED'
             logged_line_dict = {
                 'destination_ip': log_entry.remote_logname
                 , 'destination_host': log_entry.remote_host #optional field, but expected from globus_access_log* format
                 , 'user_info': {'user': clf_user}
-                , 'dataset_uuid': None
+                , 'entity_uuid': None
+                , 'dataset_type': 'UNTRACKED'
+                , 'application_id': 'UNTRACKED'
+                , 'entity_type': 'UNTRACKED'
                 , 'relative_file_path': None
                 , 'bytes_transferred': log_entry.bytes_sent
                 , 'download_date_time': log_entry.request_time.astimezone(tz_utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
@@ -282,9 +311,7 @@ def create_dict_by_session_from_log_lines(log_file_lines:list[str], provenance_d
             try:
                 for regex in RETAIN_LINE_RE_LIST:
                     if re.match(regex, log_entry.request_line):
-                        logger.debug(f"KBKBKB log_entry.request_line={log_entry.request_line}")
                         request_tokens = log_entry.request_line.split()
-                        logger.debug(f"KBKBKB request_tokens={str(request_tokens)}")
                         request_target = request_tokens[1]
                         requested_filename = re.sub(r'\?.*', '', request_target)
                         logged_line_dict['relative_file_path'] = requested_filename
@@ -297,25 +324,26 @@ def create_dict_by_session_from_log_lines(log_file_lines:list[str], provenance_d
                 # Expect paths probably start with slash, but filter the empty token rather than strip() the string
                 file_path_tokens = [path_elt for path_elt in logged_line_dict['relative_file_path'].split(os.sep) if path_elt]
                 if file_path_tokens[0] in ['consortium', 'protected'] and len(file_path_tokens[2]) == 32:
-                    logged_line_dict['dataset_uuid'] = file_path_tokens[2]
+                    logged_line_dict['entity_uuid'] = file_path_tokens[2]
                 elif len(file_path_tokens[0]) == 32:
-                    logged_line_dict['dataset_uuid'] = file_path_tokens[0]
+                    logged_line_dict['entity_uuid'] = file_path_tokens[0]
                 else:
-                    logger.error(f"Expected to determine dataset_uuid using"
+                    logger.error(f"Expected to determine entity_uuid using"
                                  f" logged_line_dict['relative_file_path']={logged_line_dict['relative_file_path']}"
                                  f" but encountered unexpected format.")
+            if logged_line_dict['entity_uuid']:
+                logged_line_dict['dataset_type'] = 'PENDING'
+                logged_line_dict['application_id'] = 'PENDING'
+                logged_line_dict['entity_type'] = 'PENDING'
 
             iso8601_utc_request_time = log_entry.request_time_fields['timestamp'].isoformat().replace('+00:00', 'Z')
             logged_line_dict['provenance'] = copy.deepcopy(provenance_dict)
             # Work up a unique key for this document which can be used as the ElasticSearch document _id.
-            src_file_base = logged_line_dict['provenance'][PROC_NAME]['destination_local_file'].replace(f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}{os.sep}"
-                                                                                                                         ,''
-                                                                                                                         ,1)
+            src_file_base = logged_line_dict['provenance'][PROJECT_NAME]['destination_local_file'].replace(f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROJECT_NAME}{os.sep}")
             src_file_base = src_file_base.replace('.json','').replace(os.sep,'_')
             transfer_line_number = idx+1
-            logged_line_dict['provenance'][PROC_NAME]['source_log_line'] = transfer_line_number
-            logged_line_dict['provenance'][PROC_NAME]['es_id'] = f"{src_file_base}" \
-                                                                                  f"_{transfer_line_number}"
+            logged_line_dict['provenance'][PROJECT_NAME]['source_log_line'] = transfer_line_number
+            logged_line_dict['provenance'][PROJECT_NAME]['es_id'] = f"{src_file_base}_{transfer_line_number}"
 
             log_lines_list.append(logged_line_dict)
         except Exception as e:
@@ -356,7 +384,7 @@ def get_unparsed_log_dict():
         if node_dir not in node_json_file_dict:
             node_json_file_dict[node_dir] = []
         node_log_dir_fullpath = f"{LOG_FILE_NIGHTLY_DIR}{os.sep}{node_dir}{os.sep}httpd"
-        node_json_dir_fullpath = f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}{os.sep}{node_dir}"
+        node_json_dir_fullpath = f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROJECT_NAME}{os.sep}{node_dir}"
         logger.debug(f"Correlate input from logs found at {node_log_dir_fullpath}"
                      f" with JSON found at {node_json_dir_fullpath}.")
         
@@ -375,8 +403,7 @@ def get_unparsed_log_dict():
 
     logger.info(f"Found {log_file_count} log files to correlate with {json_file_count} json files.")
 
-    # Identify the input log files for which there is not a
-    # corresponding output JSON file.
+    # Identify the input log files for which there is not a corresponding output JSON file.
     parsing_src_dest_dict={}
     for node_dir in node_log_file_dict:
         for input_filename in node_log_file_dict[node_dir]:
@@ -384,7 +411,7 @@ def get_unparsed_log_dict():
             # 'httpd' directory under each node directory like the input has.  Distinction between
             # Globus transfers and HTTP transfers is by name of output file.
             output_filename = re.sub(f"{LOG_FILE_NIGHTLY_DIR}{os.sep}{node_dir}{os.sep}httpd"
-                                     ,f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}{os.sep}{node_dir}"
+                                     ,f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROJECT_NAME}{os.sep}{node_dir}"
                                      ,input_filename)
             output_filename = f"{output_filename}.json"
             if output_filename in node_json_file_dict[node_dir]:
@@ -394,10 +421,10 @@ def get_unparsed_log_dict():
     return parsing_src_dest_dict
 
 if __name__ == '__main__':
-    msg =   f":large_orange_circle: {portfolio_utils.get_slack_host_context()} :large_orange_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_orange_circle:\n" \
+    msg =   f":large_orange_circle: {portfolio_utils.get_slack_host_context()} :large_orange_circle: {PROJECT_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_orange_circle:\n" \
             f"{SLACK_NEUTRAL_INFO_EMOJI} Launched to process Globus access logs\n" \
-            f" to create JSON files at {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}.\n" \
-            f" {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}.\n" \
+            f" to create JSON files at {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROJECT_NAME}.\n" \
+            f" {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROJECT_NAME}.\n" \
             f" Process logging to {log_file_name}\n" \
             f":large_orange_circle:"
     logger.info(msg)
@@ -444,7 +471,7 @@ if __name__ == '__main__':
         else:
             node_prefix = f"{node_dirname}{os.sep}"
         src_dest_prov_dict = {
-            PROC_NAME: {
+            PROJECT_NAME: {
                 'process_script' : os.path.basename(__file__)
                 , 'process_utc_dt': datetime.now(tz_utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
                 , 'source_log_file' : f"{input_filename}"
@@ -453,8 +480,6 @@ if __name__ == '__main__':
         }
 
         try:
-            # KBKBKB @TODO verify generator/yield lazy reading approach
-            #log_lines = get_log_lines_from_gzip_file(file_name=input_filename)
             log_file_lines=[]
             is_gz = input_filename.endswith('.gz') or portfolio_utils.is_gzip_file(input_filename)
             open_func = gzip.open if is_gz else open
@@ -471,11 +496,7 @@ if __name__ == '__main__':
             successful_http_transfers = create_dict_by_session_from_log_lines(log_file_lines = log_file_lines
                                                                               , provenance_dict = src_dest_prov_dict
                                                                               , node_dirname = node_dirname)
-            # KBKBKB @TODO pull interesting_lines=pull_interesting_lines(log_line_dict_list=line_dicts_list)
-            # KBKBKB @TODO pull logger.info(f"Found {len(interesting_lines)} data file transfer events among {len(line_dicts_list)} Globus access log lines.")
 
-            # KBKBKB @TODO pull successful_http_transfers=identify_successful_http_transfers(file_xfer_lines=interesting_lines)
-                
             save_transfer_stats_as_json(transfer_stats_list=successful_http_transfers
                                         , json_filename=parsing_src_dest_dict[input_filename])
             logger.info(f"Saved {len(successful_http_transfers)} file transfer stats to '{parsing_src_dest_dict[input_filename]}'")
@@ -485,11 +506,11 @@ if __name__ == '__main__':
             
     process_utc_finish = datetime.now(tz_utc)
 
-    good_news = (f":large_orange_circle: {portfolio_utils.get_slack_host_context()} :large_orange_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_orange_circle:\n"
+    good_news = (f":large_orange_circle: {portfolio_utils.get_slack_host_context()} :large_orange_circle: {PROJECT_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_orange_circle:\n"
                  f"{SLACK_GOOD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                  f" finished at {process_utc_finish.strftime('%Y-%m-%d %H:%M:%S %Z')} after"
                  f" {int((process_utc_finish - process_utc_start).total_seconds() // 60)} minutes.\n"
-                 f" Wrote {processed_file_count} JSON files to {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}.\n"
+                 f" Wrote {processed_file_count} JSON files to {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROJECT_NAME}.\n"
                  f" Process logged to {log_file_name}\n"
                  f"{':orange_heart: ' * 5}\n"
                  f":large_orange_circle:")

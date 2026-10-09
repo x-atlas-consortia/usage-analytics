@@ -19,7 +19,7 @@ N.B. The tables within DuckDB are performing adequately after the initial
 
 Sentinel files should exist along with each JSON file with file transfer
 content.  Comments in the globus-downloads-to-JSON pipeline should
-describe the various stats of sentinel files.  This loader's interpretation
+describe the various states of sentinel files.  This loader's interpretation
 of sentinal files is as follows.
 
 1. On each run, if there are any duplicate sentinel files, log each one

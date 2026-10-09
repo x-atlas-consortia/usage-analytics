@@ -1,6 +1,5 @@
 [ProcessSpecificSettings]
-PROC_NAME=globus-downloads-to-JSON
-NODE_LOG_DIR_LIST=['dtn03','dtn02','app001']
+PROJECT_NAME=globus-downloads-to-JSON
 SLACK_NOTIFICATION_CHANNEL=log-processing
 SLACK_BAD_NEWS_EMOJI=:bangbang:
 SLACK_GOOD_NEWS_EMOJI=:white_check_mark:

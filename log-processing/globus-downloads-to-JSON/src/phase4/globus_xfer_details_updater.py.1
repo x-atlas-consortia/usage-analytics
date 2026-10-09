@@ -22,6 +22,17 @@ process_utc_start = datetime.now(tz_utc)
 
 print('Resolving PENDING fields using Globus transfer details')
 
+# This script's own Slack header emoji: derived from its parent directory name
+# ('phase3' -> ':three:'), so relocating a script to a different phase directory
+# automatically updates its emoji with no code change. Falls back to ':diamonds:'
+# if the parent directory doesn't match the 'phaseN' pattern.
+_PHASE_NUMBER_WORDS = {1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine'}
+_phase_dir_match = re.match(r'^phase(\d+)$', Path(__file__).resolve().parent.name)
+if _phase_dir_match and int(_phase_dir_match.group(1)) in _PHASE_NUMBER_WORDS:
+    SLACK_PHASE_EMOJI = f":{_PHASE_NUMBER_WORDS[int(_phase_dir_match.group(1))]}:"
+else:
+    SLACK_PHASE_EMOJI = ':diamonds:'
+
 #
 # arg_process_dir replaces the old hardcoded HIVE_DEPLOY_BASE. It's the .sh wrapper's own
 # BASH_SOURCE-derived PROCESS_DIR (e.g. .../log-processing/globus-downloads-to-JSON), passed
@@ -41,10 +52,13 @@ arg_portfolio_dir = os.path.dirname(arg_process_dir)  # one level above arg_proc
 #
 Config = configparser.ConfigParser()
 
+# NOTE: this script lives one directory deeper than before (src/phase3/, not src/
+# directly), so its own vm001-default candidate needs the extra phase3/ segment, and
+# the PyCharm-dev candidate needs an extra '../' level.
 process_ini_candidates = [
-    Path('globus_xfer_details_updater.ini'),                                    # Docker WORKDIR
-    Path(f'{arg_process_dir}/src/globus_xfer_details_updater.ini'),             # vm001 default
-    Path('../../globus-downloads-to-JSON/src/globus_xfer_details_updater.ini'), # PyCharm dev
+    Path('globus_xfer_details_updater.ini'),                                                # Docker WORKDIR
+    Path(f'{arg_process_dir}/src/phase3/globus_xfer_details_updater.ini'),                 # vm001 default
+    Path('../../../globus-downloads-to-JSON/src/phase3/globus_xfer_details_updater.ini'),  # PyCharm dev
 ]
 config_file_name = None
 for candidate in process_ini_candidates:
@@ -56,11 +70,11 @@ if not config_file_name:
     sys.exit(3)
 Config.read(config_file_name)
 try:
-    # PROC_NAME must match the PROC_NAME used by globus_access_log_extract.py and
-    # gridftp_log_extract.py -- that's the directory under JSON_FILE_NIGHTLY_DIR this
-    # process scans for their stage-1-complete markers. It is not a separate namespace.
+    # PROC_NAME must match the PROC_NAME used by globus_access_log_extract.py,
+    # gridftp_log_extract.py, and augment_with_entity_info.py -- that's the directory
+    # under JSON_FILE_NIGHTLY_DIR this process scans for their stage-2-complete
+    # markers. It is not a separate namespace.
     PROC_NAME = Config.get('ProcessSpecificSettings', 'PROC_NAME')
-    NODE_LOG_DIR_LIST = Config.get('ProcessSpecificSettings', 'NODE_LOG_DIR_LIST')
     SLACK_NOTIFICATION_CHANNEL = Config.get('ProcessSpecificSettings', 'SLACK_NOTIFICATION_CHANNEL')
     SLACK_BAD_NEWS_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_BAD_NEWS_EMOJI')
     SLACK_GOOD_NEWS_EMOJI = Config.get('ProcessSpecificSettings', 'SLACK_GOOD_NEWS_EMOJI')
@@ -79,7 +93,7 @@ print('Process-specific configuration loaded')
 exec_info_dir_candidates = [
     Path('exec_info'),                                                             # Docker WORKDIR
     Path(f'{arg_process_dir}/exec_info'),                 # vm001 default
-    Path(f'../../{PROC_NAME}/exec_info'),                 # PyCharm dev
+    Path(f'../../../{PROC_NAME}/exec_info'),               # PyCharm dev
 ]
 exec_info_dir = None
 for candidate in exec_info_dir_candidates:
@@ -107,7 +121,7 @@ try:
     candidates = [
         Path('logProcessingProject.ini'),                                    # Docker WORKDIR
         Path(f'{arg_portfolio_dir}/src/logProcessingProject.ini'),          # vm001 default
-        Path('../../src/logProcessingProject.ini'),                          # PyCharm dev
+        Path('../../../src/logProcessingProject.ini'),                        # PyCharm dev
     ]
     for candidate in candidates:
         if candidate.is_file():
@@ -119,6 +133,11 @@ try:
     print('Shared log processing configuration loaded.')
     TRANSFER_DETAIL_FILE = portfolio_config['TRANSFER_DETAIL_FILE']
     JSON_FILE_NIGHTLY_DIR = portfolio_config['JSON_FILE_NIGHTLY_DIR']
+    # NODE_LOG_DIR_LIST now comes from the shared portfolio config, not this script's own
+    # ini, per Karl's call to stop repeating it in every phase's own ini file. Parsed here,
+    # matching how every other list/dict-shaped shared value works (LogExtractXferUtils
+    # stores the raw string; each caller parses it) -- e.g. SLACK_SUPPORTED_CHANNELS.
+    node_dir_list = ast.literal_eval(portfolio_config['NODE_LOG_DIR_LIST'])
     logger.info("LogExtractXferUtils instantiated.")
 except Exception as e:
     print(f"Error configuring for startup due to e={str(e)}")
@@ -126,34 +145,29 @@ except Exception as e:
     sys.exit(3)
 print('Portfolio configuration loaded')
 
-# Create a usable Python list global from the str in the INI file
-node_dir_list = ast.literal_eval(NODE_LOG_DIR_LIST)
-
-# Marker filenames indicating stage 1 (globus_access_log_extract.py / gridftp_log_extract.py)
-# has completed for a given data file, and it's waiting on stage 2 (this process). A full match
-# is required, not a substring check -- '.json.DONE.1' is itself a substring of '.json.DONE.1.2',
-# so a file already advanced past stage 2 must not be re-matched here.
-STAGE1_DONE_PATTERNS = [
-    re.compile(r'^globus_access_log-\d{8}\.json\.DONE\.1$')
-    ,re.compile(r'^gridftp\.log-\d{8}\.json\.DONE\.1$')
+# Marker filenames indicating stage 3 (geolocation_details_updater.py) has completed
+# for a given data file, and it's waiting on stage 4 (this process). A full match is
+# required, not a substring check -- '.json.DONE.1.2.3' is itself a substring of
+# '.json.DONE.1.2.3.4', so a file already advanced past stage 4 must not be re-matched.
+STAGE3_DONE_PATTERNS = [
+    re.compile(r'^globus_access_log-\d{8}\.json\.DONE\.1\.2\.3$')
+    ,re.compile(r'^gridftp\.log-\d{8}\.json\.DONE\.1\.2\.3$')
 ]
 
-# Marker filenames indicating a file went through this process (and Phase 3) at least once
+# KBKBKB @TODO - rewrite these comments for swapping phases 3 & 4!!!
+# Marker filenames indicating a file went through this process at least once
 # but was left provisional: it still had a 'PENDING' record when this process last touched
 # it, meaning the usage CSV hadn't yet caught up to that record's download_date_time. Since
 # every phase runs every invocation, a file left provisional persists between runs as
-# '.LOADED.1.2.3' (it did reach Phase 3 -- geolocation doesn't depend on user-identity
-# status). The 2-level '.LOADED.1.2' form is also recognized, defensively, in case Phase 3
+# '.LOADED.1.2.3.4'. The 3-level '.DONE.1.2.3' form is also recognized, defensively, in case Phase 4
 # failed on this specific file on a prior run after this process succeeded. Either is
-# re-checked on every run alongside fresh STAGE1_DONE_PATTERNS matches until no 'PENDING'
-# record remains, at which point the file is renamed to '.DONE.1.2' for good (whether or not
-# any of its records ended up 'UNRESOLVED' -- that's a terminal outcome, not a retry trigger;
-# see has_pending_records).
-STAGE_LOADED_RETRY_PATTERNS = [
-    re.compile(r'^globus_access_log-\d{8}\.json\.LOADED\.1\.2$')
-    ,re.compile(r'^gridftp\.log-\d{8}\.json\.LOADED\.1\.2$')
-    ,re.compile(r'^globus_access_log-\d{8}\.json\.LOADED\.1\.2\.3$')
-    ,re.compile(r'^gridftp\.log-\d{8}\.json\.LOADED\.1\.2\.3$')
+# re-checked on every run alongside fresh STAGE3_DONE_PATTERNS matches until no 'PENDING'
+# record remains, at which point the file is renamed to '.DONE.1.2.3' for good (whether or
+# not any of its records ended up 'UNRESOLVED' -- that's a terminal outcome, not a retry
+# trigger; see has_pending_records).
+STAGE4_LOADED_RETRY_PATTERNS = [
+    re.compile(r'^globus_access_log-\d{8}\.json\.LOADED\.1\.2\.3\.4$')
+    ,re.compile(r'^gridftp\.log-\d{8}\.json\.LOADED\.1\.2\.3\.4$')
 ]
 
 # The key this process uses for its own entry in each JSON object's provenance dict.
@@ -187,7 +201,7 @@ def verify_configuration_expectations():
                   f"'{node_json_dir_fullpath}'")
             exit_rather_than_return = True
     if exit_rather_than_return:
-        bad_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
+        bad_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_yellow_circle:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
                     f" Halted trying to verify configuration expectations.\n"
@@ -255,16 +269,16 @@ def load_globus_usage_xfer_from_csv():
                      f" left as 'PENDING' this run, since coverage can't be confirmed.")
     return globus_usage_xfer_dict, coverage_latest_utc
 
-# Find files ready for this process to work on: either freshly stage-1-complete
-# (STAGE1_DONE_PATTERNS) or previously loaded here but still waiting on the CSV to catch up
-# (STAGE_LOADED_RETRY_PATTERNS). A file already fully advanced past stage 2 has a marker
-# ending '.DONE.1.2', not '.DONE.1' or '.LOADED.1.2', so it naturally stops matching either
-# pattern set here -- no separate "already done" check needed.
+# Find files ready for this process to work on: either freshly stage-2-complete
+# (STAGE3_DONE_PATTERNS) or previously loaded here but still waiting on the CSV to catch up
+# (STAGE4_LOADED_RETRY_PATTERNS). A file already fully advanced past stage 3 has a marker
+# ending '.DONE.1.2.3', not '.DONE.1.2' or '.LOADED.1.2.3'/'.LOADED.1.2.3.4', so it naturally
+# stops matching either pattern set here -- no separate "already done" check needed.
 def get_processable_markers():
     global node_dir_list
 
     marker_files = []
-    all_patterns = STAGE1_DONE_PATTERNS + STAGE_LOADED_RETRY_PATTERNS
+    all_patterns = STAGE3_DONE_PATTERNS + STAGE4_LOADED_RETRY_PATTERNS
     for node_dir in node_dir_list:
         node_json_dir_fullpath = f"{JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}{os.sep}{node_dir}"
         for f in Path(node_json_dir_fullpath).iterdir():
@@ -387,25 +401,25 @@ def has_pending_records(transfer_records:list)->bool:
     return any(r.get('user_info', {}).get('user') == 'PENDING' for r in transfer_records)
 
 # Read the data file for one processable marker (see get_processable_markers) -- a fresh
-# stage-1-done file, or a previously-loaded file being retried, regardless of how far it got
-# last time ('.LOADED.1.2' or '.LOADED.1.2.3' are both accepted as input; see
-# STAGE_LOADED_RETRY_PATTERNS). Resolves what the transfer-details CSV allows, overwrites the
-# same data file in place, and always writes a fresh 2-level marker: '.DONE.1.2' if no
-# 'PENDING' record remains, or '.LOADED.1.2' if at least one still does -- resetting any
-# incoming '.3' so Phase 3 re-runs on it fresh within this same invocation regardless of
-# whether this file reached Phase 3 before. Returns (data_filename, still_loaded) on
+# stage-2-done file, or a previously-loaded file being retried, regardless of how far it got
+# last time ('.LOADED.1.2.3' or '.LOADED.1.2.3.4' are both accepted as input; see
+# STAGE4_LOADED_RETRY_PATTERNS). Resolves what the transfer-details CSV allows, overwrites
+# the same data file in place, and always writes a fresh 3-level marker: '.DONE.1.2.3' if no
+# 'PENDING' record remains, or '.LOADED.1.2.3' if at least one still does -- resetting any
+# incoming '.4' so Phase 4 re-runs on it fresh within this same invocation regardless of
+# whether this file reached Phase 4 before. Returns (data_filename, still_loaded) on
 # success, or None on failure.
 # N.B. simple/hard-coded for now, per plan -- atomic temp-file replace for the data file,
 # and the read-only permission handling, come with next week's checklist pass.
 def process_marker_file(marker_filename:str, xfer_details_dict:dict, csv_coverage_latest_utc):
-    if marker_filename.endswith('.DONE.1'):
-        data_filename = re.sub(r'\.DONE\.1$', '', marker_filename)
+    if marker_filename.endswith('.DONE.1.2'):
+        data_filename = re.sub(r'\.DONE\.1\.2$', '', marker_filename)
+    elif marker_filename.endswith('.LOADED.1.2.3.4'):
+        data_filename = re.sub(r'\.LOADED\.1\.2\.3\.4$', '', marker_filename)
     elif marker_filename.endswith('.LOADED.1.2.3'):
         data_filename = re.sub(r'\.LOADED\.1\.2\.3$', '', marker_filename)
-    elif marker_filename.endswith('.LOADED.1.2'):
-        data_filename = re.sub(r'\.LOADED\.1\.2$', '', marker_filename)
     else:
-        logger.error(f"Marker '{marker_filename}' doesn't match any recognized stage-1-done or"
+        logger.error(f"Marker '{marker_filename}' doesn't match any recognized stage-2-done or"
                       f" loaded-retry pattern; skipping.")
         return None
 
@@ -435,10 +449,10 @@ def process_marker_file(marker_filename:str, xfer_details_dict:dict, csv_coverag
         jf.write(json.dumps(transfer_records))
 
     if has_pending_records(transfer_records):
-        new_marker = f"{data_filename}.LOADED.1.2"
+        new_marker = f"{data_filename}.LOADED.1.2.3"
         still_loaded = True
     else:
-        new_marker = f"{data_filename}.DONE.1.2"
+        new_marker = f"{data_filename}.DONE.1.2.3"
         still_loaded = False
 
     if marker_filename != new_marker:
@@ -450,7 +464,7 @@ def process_marker_file(marker_filename:str, xfer_details_dict:dict, csv_coverag
     return data_filename, still_loaded
 
 if __name__ == '__main__':
-    msg =   f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n" \
+    msg =   f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_yellow_circle:\n" \
             f"{SLACK_NEUTRAL_INFO_EMOJI} Launched to resolve PENDING fields in" \
             f" JSON files at {JSON_FILE_NIGHTLY_DIR}{os.sep}{PROC_NAME}\n" \
             f" using Globus Usage Details.\n" \
@@ -467,7 +481,7 @@ if __name__ == '__main__':
     xfer_details_dict, csv_coverage_latest_utc = load_globus_usage_xfer_from_csv()
 
     marker_files = get_processable_markers()
-    logger.info(f"Found {len(marker_files)} files ready to process (stage-1-done or loaded-retry).")
+    logger.info(f"Found {len(marker_files)} files ready to process (stage-2-done or loaded-retry).")
 
     advanced_to_done_count = 0
     still_loaded_count = 0
@@ -490,7 +504,7 @@ if __name__ == '__main__':
             failed_count += 1
 
     if failed_count > 0:
-        bad_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
+        bad_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_yellow_circle:\n"
                     f"{SLACK_BAD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     f" exited after {int((datetime.now(tz_utc) - process_utc_start).total_seconds())} seconds.\n"
                     f" {failed_count} of {failed_count + advanced_to_done_count + still_loaded_count} files could not be processed. See the logs.\n"
@@ -503,7 +517,7 @@ if __name__ == '__main__':
                                            , mentions_dict=slack_user_id_mentions_on_error_dict)
 
     process_utc_finish = datetime.now(tz_utc)
-    good_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} :diamonds: {Path(__file__).name} :large_yellow_circle:\n"
+    good_news = (f":large_yellow_circle: {portfolio_utils.get_slack_host_context()} :large_yellow_circle: {PROC_NAME} {SLACK_PHASE_EMOJI} {Path(__file__).name} :large_yellow_circle:\n"
                  f"{SLACK_GOOD_NEWS_EMOJI} The process started at {process_utc_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                  f" finished at {process_utc_finish.strftime('%Y-%m-%d %H:%M:%S %Z')} after"
                  f" {int((process_utc_finish - process_utc_start).total_seconds() // 60)} minutes.\n"

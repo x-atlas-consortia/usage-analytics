@@ -55,16 +55,9 @@ class LogFileStatusType(Enum):
 
 class LogExtractXferUtils:
 
-    portfolio_config_dict = {}
-    # If the process code calling this class's constructor indicates
-    # Slack notifications should be disabled (e.g. during development),
-    # set this global to True
-    slack_notification_disabled = False
-
     def __init__(self, config_file_name:str, disable_slack_notifications=False):
-        global slack_notification_disabled
-
-        slack_notification_disabled = disable_slack_notifications
+        self.portfolio_config_dict = {}
+        self.slack_notification_disabled = disable_slack_notifications
 
         #
         # Read configuration from the project INI file and set global constants
@@ -93,13 +86,18 @@ class LogExtractXferUtils:
         self.portfolio_config_dict['PROJECT_HIVE_DIR'] = config.get('LocalServerSettings', 'PROJECT_HIVE_DIR')
         self.portfolio_config_dict['PROJECT_DEV_DIR'] = config.get('LocalServerSettings', 'PROJECT_DEV_DIR')
         self.portfolio_config_dict['ABS_PATH_BASE_TO_REMOVE'] = config.get('LocalServerSettings', 'ABS_PATH_BASE_TO_REMOVE')
-
+        
+        self.portfolio_config_dict['NEO4J_URI'] = config.get('Neo4jSettings', 'NEO4J_URI')
+        self.portfolio_config_dict['NEO4J_USERNAME'] = config.get('Neo4jSettings', 'NEO4J_USERNAME')
+        self.portfolio_config_dict['NEO4J_PASSWORD'] = config.get('Neo4jSettings', 'NEO4J_PASSWORD')
+        
         self.portfolio_config_dict['AWS_ACCESS_KEY_ID'] = config.get('AWSS3ProjectSettings', 'AWS_ACCESS_KEY_ID')
         self.portfolio_config_dict['AWS_SECRET_ACCESS_KEY'] = config.get('AWSS3ProjectSettings', 'AWS_SECRET_ACCESS_KEY')
         self.portfolio_config_dict['AWS_S3_BUCKET_NAME'] = config.get('AWSS3ProjectSettings', 'AWS_S3_BUCKET_NAME')
         self.portfolio_config_dict['AWS_FOLDER_DELIM'] = config.get('AWSS3ProjectSettings', 'AWS_FOLDER_DELIM')
         self.portfolio_config_dict['AWS_ELASTICSEARCH_URL'] = config.get('AWSS3ProjectSettings', 'AWS_ELASTICSEARCH_URL')
         self.portfolio_config_dict['AWS_REGION_NAME'] = config.get('AWSS3ProjectSettings', 'AWS_REGION_NAME')
+        
         self.portfolio_config_dict['SLACK_SUPPORTED_CHANNELS'] = config.get('SlackNotificationSettings', 'SLACK_SUPPORTED_CHANNELS')
         self.portfolio_config_dict['SLACK_CHANNEL_TOKEN'] = config.get('SlackNotificationSettings', 'SLACK_CHANNEL_TOKEN')
         self.portfolio_config_dict['SLACK_MAX_MSG_LENGTH'] = int(config.get('SlackNotificationSettings', 'SLACK_MAX_MSG_LENGTH'))
@@ -223,6 +221,31 @@ class LogExtractXferUtils:
         return f"{host} ({location})"
 
     ####################################################################################################
+    ## Neo4j support
+    ####################################################################################################
+    def query_neo4j(self, query: str) -> list:
+        """
+        Run a Cypher query against Neo4j using connection details from this
+        portfolio's shared ini ([Neo4jSettings]: NEO4J_URI, NEO4J_USERNAME,
+        NEO4J_PASSWORD), and return the raw list of records. Imports neo4j
+        locally rather than at module level, so scripts that never call this
+        method aren't forced to have the neo4j driver installed.
+        """
+        from neo4j import GraphDatabase
+        driver = GraphDatabase.driver(
+            self.portfolio_config_dict['NEO4J_URI'],
+            auth=(
+                self.portfolio_config_dict['NEO4J_USERNAME'],
+                self.portfolio_config_dict['NEO4J_PASSWORD'],
+            ),
+        )
+        try:
+            with driver.session() as session:
+                return list(session.run(query))
+        finally:
+            driver.close()
+
+    ####################################################################################################
     ## Slack Notification
     ####################################################################################################
 
@@ -257,9 +280,8 @@ class LogExtractXferUtils:
         Dictionary with separate dictionary entries for 'Slack' and 'Email', each containing a summary of the notification.
     """
     def postToSlackChannel(self, channel:str, msg:str, mentions_dict:dict=None):
-        global slack_notification_disabled
         
-        if slack_notification_disabled:
+        if self.slack_notification_disabled:
             return
         
         # Not doing user authorization for this utility, which is only for use on internal apps

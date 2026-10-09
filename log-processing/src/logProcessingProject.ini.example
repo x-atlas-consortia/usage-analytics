@@ -5,7 +5,7 @@ TRANSFER_DETAIL_FILE=/hive/hubmap/data/public/pitt-globus-usage-reports/Globus_U
 NONPUBLIC_GEO_DB=/hive/users/hive/scripts/PittCronJobs/analytics/non-public_geolocation_data/IP2LOCATION-LITE-DB11.csv
 
 # Output data file locations for data created and maintained by the portfolio
-DUCKDB_PATH=/hive/hubmap/pitt-analytics/globus-downloads-duckdb/downloads.duckdb
+DUCKDB_PATH=/hive/hubmap/pitt-analytics/duckdb-data/downloads.duckdb
 
 # KBKBKB @TODO deprecated setting to refactor
 JSON_FILE_NIGHTLY_DIR=/hive/hubmap/pitt-analytics
@@ -26,6 +26,13 @@ PROJECT_HIVE_DIR=/hive/users/hive/scripts/PittCronJobs/globus_log_parsing/usage-
 #      (File > Project Structure > Sources) so sibling portfolio modules resolve correctly.
 PROJECT_DEV_DIR=log-processing
 ABS_PATH_BASE_TO_REMOVE=/hive/hubmap/data/
+
+[Neo4jSettings]
+# Neo4j connection (default value used for docker localhost deployment)
+# Point to remote neo4j for dev/test/stage/prod deployment
+NEO4J_URI='bolt://address:port'
+NEO4J_USERNAME='neo4j'
+NEO4J_PASSWORD=''
 
 [AWSS3ProjectSettings]
 AWS_ACCESS_KEY_ID=
