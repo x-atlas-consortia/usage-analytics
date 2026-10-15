@@ -7,7 +7,7 @@
 
 LOG_PROCESSING_DIR="/hive/users/hive/scripts/PittCronJobs/analytics/usage-analytics/log-processing"
 EXTRACT_TRANSFORM_SCRIPT="${LOG_PROCESSING_DIR}/globus-downloads-to-JSON/src/execute_phase_1-to-4.sh"
-LOADER_SCRIPT="${LOG_PROCESSING_DIR}/analytics-platform-loading/src/duckdb_loader.sh"
+LOADER_SCRIPT="${LOG_PROCESSING_DIR}/analytics-platform-loading/src/phase1/duckdb_file_downloads_loader.sh"
 
 "${EXTRACT_TRANSFORM_SCRIPT}" --now
 rc=$?

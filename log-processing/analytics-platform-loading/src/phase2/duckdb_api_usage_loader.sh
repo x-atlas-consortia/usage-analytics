@@ -1,11 +1,14 @@
 #!/bin/bash
 
 #####################################################################################
-# Wrapper for duckdb_loader.py to load globus-downloads-to-JSON's output files into
-# the DuckDB file_download and hot_file_download tables.
+# Wrapper for duckdb_api_usage_loader.py (Phase 2 of analytics-platform-loading) to
+# load api-usage-to-JSON's output files into the DuckDB api_usage table.
 #
 # Uses the shared venv, reqs (replacing site-packages), and src of the log-processing
 # portfolio.
+#
+# Any arguments given to this wrapper are passed through to the Python script (e.g.
+# --duckdb-path for a testing run).
 #
 # This script intentionally does minimal pre-flight checking. The Python script reads
 # its own configuration and reports any missing INI keys or directories via a
@@ -25,15 +28,16 @@ enter_script
 
 # Derive all directory locations from the location of this script, so the script
 # works without modification on any server where the repo is checked out.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"        # .../analytics-platform-loading
-PORTFOLIO_DIR="$(dirname "$PROJECT_DIR")"     # .../log-processing
-SRC_DIR="$SCRIPT_DIR"                         # .../src (same as SCRIPT_DIR)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # .../analytics-platform-loading/src/phase2
+SRC_DIR="$(dirname "$SCRIPT_DIR")"                         # .../analytics-platform-loading/src
+PROJECT_DIR="$(dirname "$SRC_DIR")"                        # .../analytics-platform-loading
+PORTFOLIO_DIR="$(dirname "$PROJECT_DIR")"                  # .../log-processing
 PORTFOLIO_SRC_DIR="$PORTFOLIO_DIR/src"
-REQS_DIR="$PORTFOLIO_DIR/reqs"                # shared, portfolio-level -- not this project's own
+REQS_DIR="$PORTFOLIO_DIR/reqs"                             # shared, portfolio-level -- not this project's own
 EXEC_INFO_DIR="$PROJECT_DIR/exec_info"
 
 echo SCRIPT_DIR=$SCRIPT_DIR
+echo SRC_DIR=$SRC_DIR
 echo PROJECT_DIR=$PROJECT_DIR
 echo PORTFOLIO_DIR=$PORTFOLIO_DIR
 echo EXEC_INFO_DIR=$EXEC_INFO_DIR
@@ -50,8 +54,8 @@ else
     echo "No venv/ virtual environment found -- using system Python: $(which python3)"
 fi
 
-# Establish PYTHONPATH: process src/, portfolio src/, and the shared portfolio reqs/ directory.
-for a_path in "$SRC_DIR" "$PORTFOLIO_SRC_DIR" "$REQS_DIR"; do
+# Establish PYTHONPATH: phase2 src/, project src/, portfolio src/, and the shared portfolio reqs/ directory.
+for a_path in "$SCRIPT_DIR" "$SRC_DIR" "$PORTFOLIO_SRC_DIR" "$REQS_DIR"; do
     case ":$PYTHONPATH:" in
         *":$a_path:"*) ;;
         *) PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$a_path" ;;
@@ -64,12 +68,12 @@ echo Exported PYTHONPATH=$PYTHONPATH
 # fails for any other configuration reason, we want that failure captured on disk.
 mkdir -p "$EXEC_INFO_DIR"
 
-# cd into SRC_DIR so the Python script's own relative-path candidate searches
-# resolve correctly. Exit code 3 to indicate could not start due to config/environment
-# problems.
-cd "$SRC_DIR" || exit_script 3
+# cd into SCRIPT_DIR (src/phase2) so the Python script's own relative-path candidate
+# searches resolve correctly. Exit code 3 to indicate could not start due to
+# config/environment problems.
+cd "$SCRIPT_DIR" || exit_script 3
 
-echo executing "$PYTHON_CMD duckdb_loader.py with PYTHONPATH=$PYTHONPATH"
-"$PYTHON_CMD" "$SRC_DIR/duckdb_loader.py" --project-dir "$PROJECT_DIR" > "$EXEC_INFO_DIR/duckdb_loader_python_output.log" 2>&1
+echo executing "$PYTHON_CMD duckdb_api_usage_loader.py with PYTHONPATH=$PYTHONPATH"
+"$PYTHON_CMD" "$SCRIPT_DIR/duckdb_api_usage_loader.py" --project-dir "$PROJECT_DIR" "$@" > "$EXEC_INFO_DIR/duckdb_api_usage_loader_python_output.log" 2>&1
 
 exit_script $?

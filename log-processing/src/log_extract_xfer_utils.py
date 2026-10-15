@@ -81,6 +81,7 @@ class LogExtractXferUtils:
         self.portfolio_config_dict['NONPUBLIC_GEO_DB'] = config.get('LocalServerSettings', 'NONPUBLIC_GEO_DB')
         self.portfolio_config_dict['DUCKDB_PATH'] = config.get('LocalServerSettings', 'DUCKDB_PATH')
         self.portfolio_config_dict['JSON_FILE_NIGHTLY_DIR'] = config.get('LocalServerSettings', 'JSON_FILE_NIGHTLY_DIR')
+        self.portfolio_config_dict['PITT_ANALYTICS_DIR'] = config.get('LocalServerSettings', 'PITT_ANALYTICS_DIR')
         self.portfolio_config_dict['PIPELINE_OUTPUT_DIR'] = config.get('LocalServerSettings', 'PIPELINE_OUTPUT_DIR')
         self.portfolio_config_dict['NODE_LOG_DIR_LIST'] = config.get('LocalServerSettings', 'NODE_LOG_DIR_LIST')
         self.portfolio_config_dict['PROJECT_HIVE_DIR'] = config.get('LocalServerSettings', 'PROJECT_HIVE_DIR')

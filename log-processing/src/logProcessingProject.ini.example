@@ -5,13 +5,14 @@ TRANSFER_DETAIL_FILE=/hive/hubmap/data/public/pitt-globus-usage-reports/Globus_U
 NONPUBLIC_GEO_DB=/hive/users/hive/scripts/PittCronJobs/analytics/non-public_geolocation_data/IP2LOCATION-LITE-DB11.csv
 
 # Output data file locations for data created and maintained by the portfolio
-DUCKDB_PATH=/hive/hubmap/pitt-analytics/duckdb-data/downloads.duckdb
+DUCKDB_PATH=/hive/hubmap/pitt-analytics/duckdb-data/usage-analytics.duckdb
 
 # KBKBKB @TODO deprecated setting to refactor
 JSON_FILE_NIGHTLY_DIR=/hive/hubmap/pitt-analytics
 
 # Directory holding portfolio-generated files
 # KBKBKB @TODO refactor to pivot portfolio-wide to this entry
+PITT_ANALYTICS_DIR=/hive/hubmap/pitt-analytics
 PIPELINE_OUTPUT_DIR=/hive/hubmap/pitt-analytics/globus-downloads-to-JSON
 
 # Node subdirectories to scan under JSON_FILE_NIGHTLY_DIR/PROC_NAME/, as a

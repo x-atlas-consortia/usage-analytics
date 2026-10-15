@@ -1,6 +1,16 @@
 [ProcessSpecificSettings]
 PROJECT_NAME=analytics-platform-loading
 
+; Match to the PROJECT_NAME entry of
+; usage-analytics/log-processing/globus-downloads-to-JSON/src/phase1/globus_access_log_extract.ini
+; and to /hive/hubmap/pitt-analytics directory name containing JSON to load into DuckDB.
+LOAD_PROJECT_1_NAME=globus-downloads-to-JSON
+
+; Match to the PROJECT_NAME entry of
+; usage-analytics/log-processing/api-usage-to-JSON...TBD
+; and to /hive/hubmap/pitt-analytics directory name containing JSON to load into DuckDB.
+LOAD_PROJECT_2_NAME=api-usage-to-JSON
+
 SLACK_NOTIFICATION_CHANNEL=log-processing
 SLACK_BAD_NEWS_EMOJI=:bangbang:
 SLACK_GOOD_NEWS_EMOJI=:white_check_mark:
