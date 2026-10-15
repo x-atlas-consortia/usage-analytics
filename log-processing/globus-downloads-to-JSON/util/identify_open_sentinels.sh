@@ -1,12 +1,12 @@
 #!/bin/bash
 ####################################################################################################
-# Reports every JSON output file whose sentinel is currently open (.LOADED.1.2.3, meaning at
+# Reports every JSON output file whose sentinel is currently open (.LOADED.1.2.3.4, meaning at
 # least one record is still PENDING and this file will be retried on a future run), plus any
 # file where the sentinel disagrees with what the file's own content implies:
 #
-#   - A '.DONE.1.2.3' file that still has a PENDING record inside it -- dangerous: DONE is
+#   - A '.DONE.1.2.3.4' file that still has a PENDING record inside it -- dangerous: DONE is
 #     supposed to mean fully settled, and this would mean it never gets retried.
-#   - A '.LOADED.1.2.3' file with no PENDING record left -- a stale marker that should have
+#   - A '.LOADED.1.2.3.4' file with no PENDING record left -- a stale marker that should have
 #     advanced to DONE but didn't (e.g. a partial failure left it behind).
 #   - No recognized sentinel at all -- still mid-pipeline, or a prior run failed on it.
 #
@@ -24,9 +24,9 @@ for f in dtn03/*.json dtn02/*.json app001/*.json; do
 
     read -r pending unresolved < <(jq -r '"\([.[] | select(.user_info.user == "PENDING")] | length) \([.[] | select(.user_info.user == "UNRESOLVED")] | length)"' "$f")
 
-    if [ -f "${f}.DONE.1.2.3" ]; then
+    if [ -f "${f}.DONE.1.2.3.4" ]; then
         sentinel="DONE"
-    elif [ -f "${f}.LOADED.1.2.3" ]; then
+    elif [ -f "${f}.LOADED.1.2.3.4" ]; then
         sentinel="LOADED"
     else
         sentinel="MISSING"
