@@ -1,25 +1,31 @@
 from datetime import datetime
 from dotenv import load_dotenv
-import configparser
-import csv
 import glob
 import gzip
-import ipaddress
 import json
 import os
 import re
+import urllib.request
+import urllib.error
+from neo4j import GraphDatabase
 load_dotenv()
 LOG_DIR = os.getenv("GATEWAY_LOG_DIR", "/hive/hubmap/data/gateway-logs/vm001-dev")
 LOG_FILENAME_PATTERN = os.getenv("GATEWAY_LOG_PATTERN", r"uwsgi-hubmap-auth\.log-(\d{8})\.gz")
 OUTPUT_DIR = os.getenv("USAGE_OUTPUT_DIR", "./output")
 LAST_DATE_PATH = os.getenv("USAGE_LAST_DATE_PATH", "./last_processed_date.json")
-PORTFOLIO_INI_PATH = os.getenv("PORTFOLIO_INI_PATH", "../../src/logProcessingProject.ini")
 AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME")
 AWS_S3_FOLDER_NAME = os.getenv("AWS_S3_FOLDER_NAME", "")
 AWS_S3_DELIM = os.getenv("AWS_S3_DELIM", "/")
 CLF_TIME_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
-GEO_FIELDS = ("country_code", "country_name", "region_name", "city_name", "zip_code")
-UNKNOWN_GEO = {field: "UNKNOWN" for field in GEO_FIELDS}
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+PROJECT = (os.getenv("PROJECT") or "hubmap").lower()
+ID_PROPERTY = "sennet_id" if PROJECT == "sennet" else "hubmap_id"
+ENTITY_ID_QUERY = f"MATCH (e:Entity {{{ID_PROPERTY}: $entity_id}}) RETURN e.uuid AS uuid"
+UUID_API_URL = "https://uuid.api.hubmapconsortium.org/hmuuid/"
+neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+app_id_uuid_cache = {}
 filename_pattern = re.compile(LOG_FILENAME_PATTERN)
 usage_line_pattern = re.compile(
     r'(?P<client_ip>\S+) '
@@ -31,28 +37,43 @@ usage_line_pattern = re.compile(
     r'(?P<bytes>\S+) '
     r'pattern=(?P<pattern>\S+) '
     r'authority=(?P<authority>\S+)'
+    r'(?: user_agent="(?P<user_agent>[^"]*)")?'
 )
-def load_geo_db_path():
-    config = configparser.ConfigParser()
-    config.read(PORTFOLIO_INI_PATH)
-    return config.get("LocalServerSettings", "NONPUBLIC_GEO_DB")
-def load_geo_ranges(geo_db_path):
-    ranges = []
-    with open(geo_db_path, newline='') as f:
-        for row in csv.DictReader(f, delimiter='\t'):
-            if "ip_from" not in row or "ip_to" not in row:
-                continue
-            ranges.append((int(row["ip_from"]), int(row["ip_to"]), {field: row.get(field) for field in GEO_FIELDS}))
-    return ranges
-def geolocate(client_ip, geo_ranges):
+app_id_pattern = re.compile(r'[A-Z]{3}\d{3}\.[A-Z0-9]{4}\.\d{3}')
+entity_uuid_pattern = re.compile(r'(?:^|/)([0-9a-f]{32})(?:/|$)')
+def _neo4j_lookup(app_id):
+    with neo4j_driver.session() as session:
+        record = session.run(ENTITY_ID_QUERY, entity_id=app_id).single()
+    return record["uuid"] if record else None
+def _uuid_api_lookup(app_id):
+    url = UUID_API_URL + app_id
     try:
-        ip_int = int(ipaddress.ip_address(client_ip.strip()))
-    except (ValueError, AttributeError):
-        return dict(UNKNOWN_GEO)
-    for ip_from, ip_to, geo in geo_ranges:
-        if ip_from <= ip_int <= ip_to:
-            return dict(geo)
-    return dict(UNKNOWN_GEO)
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8"))
+        return data.get("uuid")
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            print(f"uuid-api HTTP {e.code} for {app_id}")
+        return None
+    except Exception as e:
+        print(f"uuid-api lookup failed for {app_id}: {e}")
+        return None
+def resolve_app_id_to_uuid(app_id):
+    if app_id in app_id_uuid_cache:
+        return app_id_uuid_cache[app_id]
+    resolved = None
+    try:
+        resolved = _neo4j_lookup(app_id)
+    except Exception as e:
+        print(f"Neo4j lookup failed for {app_id}: {e}")
+        return None
+    if resolved is None:
+        resolved = _uuid_api_lookup(app_id)
+    app_id_uuid_cache[app_id] = resolved
+    return resolved
 def load_last_date():
     try:
         with open(LAST_DATE_PATH) as f:
@@ -91,7 +112,7 @@ def build_user_info(user, client_ip):
         user_domain = None
         user_tld = None
     return {"user": username, "user_domain": user_domain, "user_tld": user_tld}
-def parse_line(line, geo_ranges):
+def parse_line(line):
     match = usage_line_pattern.search(line)
     if match is None:
         return None
@@ -104,22 +125,30 @@ def parse_line(line, geo_ranges):
         event_dt = datetime.strptime(fields["time"], CLF_TIME_FORMAT)
     except ValueError:
         return None
+    entity_uuid = None
+    entity_uuid_match = entity_uuid_pattern.search(path)
+    app_id_match = app_id_pattern.search(path)
+    if entity_uuid_match:
+        entity_uuid = entity_uuid_match.group(1)
+    elif app_id_match:
+        entity_uuid = resolve_app_id_to_uuid(app_id_match.group(0))
     return {
         "datetime": event_dt.strftime("%Y-%m-%dT%H:%M:%S"),
         "response_code": fields["status"],
         "resource_path": path,
         "resource_path_pattern": fields["pattern"],
+        **({"entity_uuid": entity_uuid} if entity_uuid is not None else {}),
         "http_method": method,
         "client_ip": fields["client_ip"],
+        "user_agent": fields.get("user_agent"),
         "host": fields["authority"],
         "user_info": build_user_info(fields["user"], fields["client_ip"]),
-        "geolocation_info": geolocate(fields["client_ip"], geo_ranges),
     }
-def process_file(path, geo_ranges):
+def process_file(path):
     records = []
     with open_log_file(path) as f:
         for line in f:
-            record = parse_line(line, geo_ranges)
+            record = parse_line(line)
             if record is not None:
                 records.append(record)
     return records
@@ -143,7 +172,6 @@ def upload_to_s3(s3_client, local_path, name):
 def main():
     last_date = load_last_date()
     rotated_logs = discover_rotated_logs()
-    geo_ranges = load_geo_ranges(load_geo_db_path())
     s3_client = None
     if AWS_S3_BUCKET_NAME:
         import boto3
@@ -159,7 +187,7 @@ def main():
     for date_int, path in rotated_logs:
         if date_int <= last_date:
             continue
-        records = process_file(path, geo_ranges)
+        records = process_file(path)
         name = output_name(date_int)
         local_path = write_output(name, records)
         if s3_client is not None:
